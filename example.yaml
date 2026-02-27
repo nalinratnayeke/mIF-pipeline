@@ -1,0 +1,68 @@
+slides_root: /data1/lowes/ratnayn/Data/CellDive_analysis_data/work
+
+instanseg_env: instanseg
+nimbus_env: nimbus
+
+slides:
+  SLIDE-0272:
+    # Where pipeline outputs go
+    slide_dir: /data1/lowes/ratnayn/Data/CellDive_analysis_data/work/SLIDE-0272
+
+    # Pixel size override if not reliably in OME metadata
+    pixel_size_um: 0.325
+
+    # Channel images that will be merged
+    input_channels:
+      - /data1/lowes/ratnayn/Data/CellDive_analysis_data/image_data/SLIDE-0272/SLIDE-0272_0.0.2_R000_DAPI_F_Tiled.tif
+      # add other channel paths...
+    channel_names:
+      - DAPI
+      # add names matching input_channels...
+
+    seg_merge:
+      enabled: true
+      channels: [DAPI]  # subset of channel_names for InstanSeg input
+      ome_path: /data1/lowes/ratnayn/Data/CellDive_analysis_data/work/SLIDE-0272/SLIDE-0272_segment_merge.ome.tif
+
+    full_merge:
+      enabled: true
+      channels: [DAPI]  # set to all/most channels for full merge
+      ome_path: /data1/lowes/ratnayn/Data/CellDive_analysis_data/work/SLIDE-0272/SLIDE-0272_full_merge.ome.tif
+
+    instanseg:
+      model: fluorescence_nuclei_and_cells
+      tile_size: 2048
+      overlap: 100
+      resolve_cell_and_nucleus: true
+      cleanup_fragments: true
+      seed_threshold: 0.6
+      planes:
+        nuclei_plane: 0
+        cells_plane: 1
+
+    mask_export:
+      mask_dir: /data1/lowes/ratnayn/Data/CellDive_analysis_data/work/SLIDE-0272/masks_whole_cell
+      suffix: _whole_cell.tiff
+      bigtiff: true
+      compression: zlib
+      tile: [256, 256]
+
+    nimbus:
+      enabled: true
+      image_globs:
+        - /data1/lowes/ratnayn/Data/CellDive_analysis_data/image_data/SLIDE-0272/*.tif
+      output_dir: /data1/lowes/ratnayn/Data/CellDive_analysis_data/work/SLIDE-0272/nimbus
+
+      # Panel management
+      channels: []  # if empty, derive from discovered images OR from channel_names if that’s correct
+      channel_chunk_size: 1
+
+      # Performance
+      batch_size: 16
+      save_predictions: true
+
+      # Normalization knobs (defaults can match your notebook)
+      quantile: 0.999
+      n_subset: 50
+      clip_values: [0, 2]
+      multiprocessing: true
