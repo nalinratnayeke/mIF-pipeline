@@ -1,36 +1,40 @@
 slides_root: /data1/lowes/ratnayn/Data/CellDive_analysis_data/work
-
 instanseg_env: instanseg
 nimbus_env: nimbus
 
 slides:
   SLIDE-0272:
-    # Where pipeline outputs go
     slide_dir: /data1/lowes/ratnayn/Data/CellDive_analysis_data/work/SLIDE-0272
-
-    # Pixel size override if not reliably in OME metadata
     pixel_size_um: 0.325
 
-    # Channel images that will be merged
-    input_channels:
-      - /data1/lowes/ratnayn/Data/CellDive_analysis_data/image_data/SLIDE-0272/SLIDE-0272_0.0.2_R000_DAPI_F_Tiled.tif
-      # add other channel paths...
-    channel_names:
-      - DAPI
-      # add names matching input_channels...
+    # Preferred explicit mapping source (can be generated via `mif-pipeline setup`)
+    channel_map_file: /workspace/mIF-pipeline/channel_map.example.json
+
+    # Optional setup phase to auto-generate starting mapping from a folder.
+    setup:
+      channel_source_dir: /data1/lowes/ratnayn/Data/CellDive_analysis_data/image_data/SLIDE-0272
+      channel_patterns: ["*.tif"]
+      channel_map_output: /data1/lowes/ratnayn/Data/CellDive_analysis_data/work/SLIDE-0272/channel_map.generated.json
 
     seg_merge:
       enabled: true
-      channels: [DAPI]  # subset of channel_names for InstanSeg input
+      channels: [R0_DAPI, R0_PANCK, R0_CD45]
       ome_path: /data1/lowes/ratnayn/Data/CellDive_analysis_data/work/SLIDE-0272/SLIDE-0272_segment_merge.ome.tif
+      compression: zlib
+      tile: [256, 256]
+      bigtiff: true
 
     full_merge:
       enabled: true
-      channels: [DAPI]  # set to all/most channels for full merge
+      channels: [R0_DAPI, R0_PANCK, R0_CD45]
       ome_path: /data1/lowes/ratnayn/Data/CellDive_analysis_data/work/SLIDE-0272/SLIDE-0272_full_merge.ome.tif
+      compression: zlib
+      tile: [256, 256]
+      bigtiff: true
 
     instanseg:
       model: fluorescence_nuclei_and_cells
+      prediction_tag: _instanseg_prediction
       tile_size: 2048
       overlap: 100
       resolve_cell_and_nucleus: true
@@ -49,19 +53,20 @@ slides:
 
     nimbus:
       enabled: true
+      image_paths: []
       image_globs:
         - /data1/lowes/ratnayn/Data/CellDive_analysis_data/image_data/SLIDE-0272/*.tif
+      image_root: null
+      image_extensions: ["*.tif", "*.tiff", "*.ome.tiff"]
+
       output_dir: /data1/lowes/ratnayn/Data/CellDive_analysis_data/work/SLIDE-0272/nimbus
-
-      # Panel management
-      channels: []  # if empty, derive from discovered images OR from channel_names if that’s correct
+      # Aliases should match setup-generated channel_map aliases (e.g., R0_DAPI).
+      channels: [R0_DAPI, R0_PANCK, R0_CD45]
       channel_chunk_size: 1
-
-      # Performance
+      join_keys: [fov, cell_id]
       batch_size: 16
       save_predictions: true
 
-      # Normalization knobs (defaults can match your notebook)
       quantile: 0.999
       n_subset: 50
       clip_values: [0, 2]
