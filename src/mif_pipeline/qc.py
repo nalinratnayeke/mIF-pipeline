@@ -63,17 +63,22 @@ def run_qc(slide_cfg: dict[str, Any]) -> dict[str, Any]:
         h, w = (int(ref.shape[-2]), int(ref.shape[-1]))
         mask_dir = Path(slide_cfg["mask_export"]["mask_dir"])
         suffix = slide_cfg["mask_export"].get("suffix", "_whole_cell.tiff")
+        nuclear_suffix = slide_cfg["mask_export"].get("nuclear_suffix", "_nuclear.tiff")
         for image in resolve_image_paths(slide_cfg, section="nimbus"):
             fov = Path(image).stem
-            mask_path = mask_dir / f"{fov}{suffix}"
-            if not mask_path.exists():
-                fail(f"mask_{fov}", f"Missing {mask_path}")
-                continue
-            mask = tifffile.imread(mask_path)
-            if mask.shape != (h, w):
-                fail(f"mask_shape_{fov}", f"Expected {(h,w)}, got {mask.shape}")
-            elif mask.dtype != np.uint32:
-                fail(f"mask_dtype_{fov}", f"Expected uint32, got {mask.dtype}")
+            mask_checks = [
+                ("whole_cell", mask_dir / f"{fov}{suffix}"),
+                ("nuclear", mask_dir / f"{fov}{nuclear_suffix}"),
+            ]
+            for mask_kind, mask_path in mask_checks:
+                if not mask_path.exists():
+                    fail(f"mask_{mask_kind}_{fov}", f"Missing {mask_path}")
+                    continue
+                mask = tifffile.imread(mask_path)
+                if mask.shape != (h, w):
+                    fail(f"mask_shape_{mask_kind}_{fov}", f"Expected {(h,w)}, got {mask.shape}")
+                elif mask.dtype != np.uint32:
+                    fail(f"mask_dtype_{mask_kind}_{fov}", f"Expected uint32, got {mask.dtype}")
         ok("mask_checks", {"mask_dir": str(mask_dir)})
 
     nimbus_cfg = slide_cfg.get("nimbus", {})

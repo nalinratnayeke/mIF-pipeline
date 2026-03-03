@@ -52,7 +52,15 @@ def step_export(config_path: str, slide_id: str, force: bool = False) -> dict[st
     _, slide_cfg = resolve(config_path, slide_id)
     m = _manifest(slide_cfg)
     outputs = run_export(slide_cfg, force=force)
-    m.record("export", "completed", detail={"mask_dir": outputs.get("mask_dir"), "count": len(outputs.get("masks", []))})
+    m.record(
+        "export",
+        "completed",
+        detail={
+            "mask_dir": outputs.get("mask_dir"),
+            "whole_cell_count": len(outputs.get("masks", [])),
+            "nuclear_count": len(outputs.get("nuclear_masks", [])),
+        },
+    )
     return outputs
 
 

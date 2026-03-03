@@ -47,6 +47,7 @@ slides:
     mask_export:
       mask_dir: /data1/lowes/ratnayn/Data/CellDive_analysis_data/work/SLIDE-0272/masks_whole_cell
       suffix: _whole_cell.tiff
+      nuclear_suffix: _nuclear.tiff
       bigtiff: true
       compression: zlib
       tile: [256, 256]
