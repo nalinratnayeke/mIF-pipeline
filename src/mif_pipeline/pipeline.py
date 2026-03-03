@@ -10,6 +10,7 @@ from .manifest import Manifest
 from .merge_ometiff import run_merge
 from .nimbus_runner import run_nimbus
 from .qc import run_qc
+from .setup import generate_channel_map
 
 
 def _manifest(slide_cfg: dict[str, Any]) -> Manifest:
@@ -21,6 +22,14 @@ def resolve(config_path: str, slide_id: str) -> tuple[dict[str, Any], dict[str, 
     slide_cfg = get_slide_config(cfg, slide_id)
     return cfg, slide_cfg
 
+
+
+def step_setup(config_path: str, slide_id: str) -> dict[str, Any]:
+    _, slide_cfg = resolve(config_path, slide_id)
+    m = _manifest(slide_cfg)
+    out = generate_channel_map(slide_cfg)
+    m.record("setup", "completed", detail=out)
+    return out
 
 def step_merge(config_path: str, slide_id: str, force: bool = False) -> dict[str, Any]:
     cfg, slide_cfg = resolve(config_path, slide_id)

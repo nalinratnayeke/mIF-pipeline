@@ -11,6 +11,7 @@ from .pipeline import (
     step_nimbus,
     step_qc,
     step_run,
+    step_setup,
 )
 
 
@@ -24,7 +25,7 @@ def main() -> None:
     parser = argparse.ArgumentParser(prog="mif-pipeline")
     sub = parser.add_subparsers(dest="command", required=True)
 
-    for name in ["run", "merge", "instanseg", "export", "nimbus", "qc", "dry-run"]:
+    for name in ["run", "merge", "instanseg", "export", "nimbus", "qc", "dry-run", "setup"]:
         sp = sub.add_parser(name)
         _common(sp)
 
@@ -44,6 +45,8 @@ def main() -> None:
         out = step_qc(args.config, args.slide)
     elif args.command == "dry-run":
         out = step_dry_run(args.config, args.slide)
+    elif args.command == "setup":
+        out = step_setup(args.config, args.slide)
     else:
         raise RuntimeError(f"Unknown command: {args.command}")
 

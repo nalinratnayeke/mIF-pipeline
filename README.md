@@ -18,6 +18,7 @@ pip install -e .
 All subcommands accept `--config` and `--slide`.
 
 ```bash
+mif-pipeline setup --config example.yaml --slide SLIDE-0272
 mif-pipeline dry-run --config example.yaml --slide SLIDE-0272
 mif-pipeline merge --config example.yaml --slide SLIDE-0272
 mif-pipeline instanseg --config example.yaml --slide SLIDE-0272
@@ -54,4 +55,11 @@ Use `--force` with any step to overwrite existing outputs.
 - InstanSeg runner applies the required TiffSlide monkey patch before `eval_whole_slide_image`.
 - Export uses nearest-neighbor resize (`order=0`, `preserve_range=True`, `anti_aliasing=False`) to preserve integer IDs.
 - Nimbus chunks channels into `chunk_<k:03d>` directories to avoid CSV/prediction overwrite collisions.
+- Nimbus consolidates chunk tables into `cell_table_full.csv` via robust keyed joins (default `fov` + `cell_id`; configurable with `nimbus.join_keys`).
+- Use `channel_map_file` (JSON) to explicitly map `{alias, path, nimbus_name}` and avoid index-shift errors.
+- `seg_merge` and `full_merge` support configurable TIFF writing knobs: `compression`, `tile`, and `bigtiff`.
+- `mif-pipeline setup` can auto-generate a starter `channel_map.generated.json` from a slide folder.
+- Nimbus `channels` may be provided as aliases (e.g., `DAPI`), which are translated to Nimbus dataset channel names via the channel map.
+- If `alias` is omitted, setup/default parsing derives `R{round}_{channel}` from filenames (e.g., `..._13.0.4_R000_Cy3_NaK-ATPase-555_...` -> `R13_NaK-ATPase-555`, `..._12.0.4_R000_DAPI__...` -> `R12_DAPI`, `..._13.0.1_R000_DAPI_AF_...` -> `R13_DAPI_AF`).
+- If `nimbus_name` is omitted, it defaults to filename stem (basename without extension), which is what Nimbus `include_channels` expects for single-channel file layouts.
 - Resume behavior skips chunk/step outputs when expected files already exist (unless `--force`), and records step status in `manifest.json`.

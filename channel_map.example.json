@@ -1,0 +1,17 @@
+[
+  {
+    "alias": "R0_DAPI",
+    "path": "/data1/lowes/ratnayn/Data/CellDive_analysis_data/image_data/SLIDE-0272/SLIDE-0272_0.0.2_R000_DAPI_F_Tiled.tif",
+    "nimbus_name": "SLIDE-0272_0.0.2_R000_DAPI_F_Tiled"
+  },
+  {
+    "alias": "R0_PANCK",
+    "path": "/data1/lowes/ratnayn/Data/CellDive_analysis_data/image_data/SLIDE-0272/SLIDE-0272_0.0.2_R001_PANCK_F_Tiled.tif",
+    "nimbus_name": "SLIDE-0272_0.0.2_R001_PANCK_F_Tiled"
+  },
+  {
+    "alias": "R0_CD45",
+    "path": "/data1/lowes/ratnayn/Data/CellDive_analysis_data/image_data/SLIDE-0272/SLIDE-0272_0.0.2_R002_CD45_F_Tiled.tif",
+    "nimbus_name": "SLIDE-0272_0.0.2_R002_CD45_F_Tiled"
+  }
+]

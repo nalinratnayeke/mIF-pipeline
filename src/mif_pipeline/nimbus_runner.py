@@ -1,13 +1,12 @@
 from __future__ import annotations
 
-import math
 import subprocess
 from pathlib import Path
 from typing import Any
 
 import pandas as pd
 
-from .config import resolve_image_paths
+from .config import resolve_channel_map, resolve_image_paths
 
 
 def _chunk(items: list[str], size: int) -> list[list[str]]:
@@ -78,6 +77,33 @@ _ = nimbus.predict_fovs()
 '''
 
 
+def _resolve_join_keys(cfg: dict[str, Any], tables: list[pd.DataFrame]) -> list[str]:
+    configured_keys = cfg.get("join_keys", ["fov", "cell_id"])
+    if not configured_keys:
+        raise ValueError("nimbus.join_keys cannot be empty")
+
+    missing = [k for k in configured_keys if not all(k in t.columns for t in tables)]
+    if missing:
+        raise KeyError(f"Nimbus chunk tables missing join keys across all chunks: {missing}")
+    return configured_keys
+
+
+def _drop_duplicate_non_key_cols(df: pd.DataFrame, keep: pd.DataFrame, keys: list[str]) -> pd.DataFrame:
+    common = [c for c in df.columns if c in keep.columns and c not in keys]
+    if not common:
+        return df
+    # Drop duplicate metadata columns from the new chunk to preserve deterministic merge behavior.
+    return df.drop(columns=common)
+
+
+def _merge_chunk_tables(tables: list[pd.DataFrame], keys: list[str]) -> pd.DataFrame:
+    merged = tables[0].copy()
+    for idx, table in enumerate(tables[1:], start=1):
+        next_table = _drop_duplicate_non_key_cols(table.copy(), merged, keys)
+        merged = merged.merge(next_table, on=keys, how="outer", validate="one_to_one")
+    return merged
+
+
 def run_nimbus(slide_cfg: dict[str, Any], nimbus_env: str, force: bool = False) -> dict[str, Any]:
     cfg = slide_cfg.get("nimbus", {})
     output_dir = Path(cfg["output_dir"])
@@ -85,7 +111,10 @@ def run_nimbus(slide_cfg: dict[str, Any], nimbus_env: str, force: bool = False) 
     mask_dir = Path(slide_cfg["mask_export"]["mask_dir"])
 
     fov_paths = resolve_image_paths(slide_cfg, section="nimbus")
-    channels = cfg.get("channels") or slide_cfg.get("channel_names", [])
+    channel_map = resolve_channel_map(slide_cfg)
+    alias_to_nimbus = {e["alias"]: e["nimbus_name"] for e in channel_map}
+    configured_channels = cfg.get("channels") or list(alias_to_nimbus.keys())
+    channels = [alias_to_nimbus.get(c, c) for c in configured_channels]
     chunk_size = int(cfg.get("channel_chunk_size", 1))
     batches = _chunk(channels, max(1, chunk_size))
 
@@ -125,20 +154,22 @@ def run_nimbus(slide_cfg: dict[str, Any], nimbus_env: str, force: bool = False) 
         commands.append(" ".join(cmd))
         chunk_dirs.append(str(chunk_out))
 
-    tables = []
+    chunk_tables: list[pd.DataFrame] = []
+    chunk_summaries: list[dict[str, Any]] = []
     for d in chunk_dirs:
         p = Path(d) / "nimbus_cell_table.csv"
         if p.exists():
             chunk_id = Path(d).name
             df = pd.read_csv(p)
-            df["channel_chunk"] = chunk_id
-            tables.append(df)
-    if tables:
-        merged = pd.concat(tables, ignore_index=True)
-        merged_path = output_dir / "cell_table_full.csv"
+            chunk_summaries.append({"chunk": chunk_id, "rows": int(len(df)), "columns": list(df.columns)})
+            chunk_tables.append(df)
+
+    merged_path = output_dir / "cell_table_full.csv"
+    join_keys: list[str] = []
+    if chunk_tables:
+        join_keys = _resolve_join_keys(cfg, chunk_tables)
+        merged = _merge_chunk_tables(chunk_tables, join_keys)
         merged.to_csv(merged_path, index=False)
-    else:
-        merged_path = output_dir / "cell_table_full.csv"
 
     return {
         "output_dir": str(output_dir),
@@ -146,4 +177,6 @@ def run_nimbus(slide_cfg: dict[str, Any], nimbus_env: str, force: bool = False) 
         "combined_table": str(merged_path),
         "commands": commands,
         "num_chunks": len(batches),
+        "join_keys": join_keys,
+        "chunk_summaries": chunk_summaries,
     }

@@ -8,7 +8,7 @@ import pandas as pd
 import tifffile
 import zarr
 
-from .config import expected_seg_zarr_path, resolve_image_paths
+from .config import expected_seg_zarr_path, resolve_channel_map, resolve_image_paths
 
 
 def run_qc(slide_cfg: dict[str, Any]) -> dict[str, Any]:
@@ -39,7 +39,8 @@ def run_qc(slide_cfg: dict[str, Any]) -> dict[str, Any]:
         fail("full_merge_exists", f"Missing {full_ome}")
     else:
         full = tifffile.memmap(full_ome)
-        expected_full_c = len(slide_cfg.get("full_merge", {}).get("channels", slide_cfg.get("channel_names", [])))
+        alias_keys = [e["alias"] for e in resolve_channel_map(slide_cfg)]
+        expected_full_c = len(slide_cfg.get("full_merge", {}).get("channels", alias_keys))
         got = int(full.shape[0]) if full.ndim == 3 else 1
         if got != expected_full_c:
             fail("full_merge_channels", f"Expected {expected_full_c}, got {got}")
@@ -78,7 +79,8 @@ def run_qc(slide_cfg: dict[str, Any]) -> dict[str, Any]:
     nimbus_cfg = slide_cfg.get("nimbus", {})
     out_dir = Path(nimbus_cfg.get("output_dir", ""))
     chunk_size = max(1, int(nimbus_cfg.get("channel_chunk_size", 1)))
-    channels = nimbus_cfg.get("channels") or slide_cfg.get("channel_names", [])
+    alias_keys = [e["alias"] for e in resolve_channel_map(slide_cfg)]
+    channels = nimbus_cfg.get("channels") or alias_keys
     n_chunks = (len(channels) + chunk_size - 1) // chunk_size
     for i in range(n_chunks):
         chunk_dir = out_dir / f"chunk_{i:03d}"
