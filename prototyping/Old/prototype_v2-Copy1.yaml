@@ -1,0 +1,64 @@
+# Shared defaults applied to each slide unless that slide overrides them.
+pixel_size_um: 0.325
+
+setup:
+  channel_patterns: ["*.tif", "*.tiff", "*.ome.tif", "*.ome.tiff"]
+  channel_map_output: channel_map.generated.json
+
+seg_merge:
+  enabled: true
+  channels: [R1_DAPI, R1_FITC_AF_I, R1_CY3_AF_I, R1_CY5_AF_I, R1_CY7_AF_I]
+  ome_path: SLIDE-0329_segment_merge.ome.tif
+  compression: zlib
+  tile: [256, 256]
+  bigtiff: true
+
+full_merge:
+  enabled: true
+  exclude_channels: []
+  ome_path: SLIDE-0329_full_merge.ome.tif
+  compression: zlib
+  tile: [256, 256]
+  bigtiff: true
+
+instanseg:
+  model: fluorescence_nuclei_and_cells
+  prediction_tag: _instanseg_prediction
+  tile_size: 200
+  overlap: 50
+  resolve_cell_and_nucleus: true
+  cleanup_fragments: true
+  seed_threshold: 0.6
+  planes:
+    nuclei_plane: 0
+    cells_plane: 1
+
+mask_export:
+  mask_dir: masks
+  suffix: _whole_cell.tiff
+  nuclear_suffix: _nuclear.tiff
+  bigtiff: true
+  compression: zlib
+  tile: [256, 256]
+
+nimbus:
+  enabled: true
+  output_dir: nimbus
+  # Use either channels or exclude_channels. exclude_channels: [] means all.
+  channels: [R1_DAPI, R4_GFP_POLY_AF488, R4_P19_POLYRAT, R4_ANXA10_647]
+  # exclude_channels: []
+  channel_chunk_size: 1
+  join_keys: [fov, cell_id]
+  batch_size: 16
+  save_predictions: true
+  compile_model: false
+  quantile: 0.999
+  n_subset: 50
+  clip_values: [0, 2]
+  multiprocessing: true
+
+slides:
+  SLIDE-0329_crop_2048:
+    slide_dir: /mnt/c/analysis/Data_prototype/SLIDE-0329_crop_2048
+    output_dir: /mnt/c/analysis/Data_prototype/SLIDE-0329_crop_2048/outputs
+    channel_map_file: channel_map.generated.json

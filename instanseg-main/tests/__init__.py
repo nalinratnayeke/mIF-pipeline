@@ -1,2 +1,0 @@
-# InstanSeg test suite
-

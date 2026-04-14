@@ -1,0 +1,110 @@
+{
+  "config_path": "prototyping/prototype_v2-Crop.yaml",
+  "batch_dir": "/home/ratnayn/codex/mIF-pipeline/logs/slurm/20260413_153544",
+  "phase": "all",
+  "plan_only": true,
+  "slides": [
+    "SLIDE-0329_crop_2048",
+    "SLIDE-0329_crop_2048_2"
+  ],
+  "chunk_indices": [
+    0,
+    1,
+    2,
+    3
+  ],
+  "instanseg_nimbus_env": "spatialdata",
+  "spatialdata_env": "",
+  "records": [
+    {
+      "phase": "phase1",
+      "target": "SLIDE-0329_crop_2048",
+      "job_id": null,
+      "dependency": null,
+      "stdout": "/home/ratnayn/codex/mIF-pipeline/logs/slurm/20260413_153544/phase1-SLIDE-0329_crop_2048.out",
+      "stderr": "/home/ratnayn/codex/mIF-pipeline/logs/slurm/20260413_153544/phase1-SLIDE-0329_crop_2048.err",
+      "command": "bash /home/ratnayn/codex/mIF-pipeline/scripts/run_pipeline.sh --config prototyping/prototype_v2-Crop.yaml --slide SLIDE-0329_crop_2048 --stage merge --stage instanseg",
+      "status": "planned"
+    },
+    {
+      "phase": "phase1",
+      "target": "SLIDE-0329_crop_2048_2",
+      "job_id": null,
+      "dependency": null,
+      "stdout": "/home/ratnayn/codex/mIF-pipeline/logs/slurm/20260413_153544/phase1-SLIDE-0329_crop_2048_2.out",
+      "stderr": "/home/ratnayn/codex/mIF-pipeline/logs/slurm/20260413_153544/phase1-SLIDE-0329_crop_2048_2.err",
+      "command": "bash /home/ratnayn/codex/mIF-pipeline/scripts/run_pipeline.sh --config prototyping/prototype_v2-Crop.yaml --slide SLIDE-0329_crop_2048_2 --stage merge --stage instanseg",
+      "status": "planned"
+    },
+    {
+      "phase": "phase2",
+      "target": "chunk_0",
+      "job_id": null,
+      "dependency": null,
+      "stdout": "/home/ratnayn/codex/mIF-pipeline/logs/slurm/20260413_153544/phase2-chunk_0.out",
+      "stderr": "/home/ratnayn/codex/mIF-pipeline/logs/slurm/20260413_153544/phase2-chunk_0.err",
+      "command": "bash /home/ratnayn/codex/mIF-pipeline/scripts/run_pipeline.sh --config prototyping/prototype_v2-Crop.yaml --stage nimbus --chunk 0 --slide SLIDE-0329_crop_2048 --slide SLIDE-0329_crop_2048_2",
+      "status": "planned"
+    },
+    {
+      "phase": "phase2",
+      "target": "chunk_1",
+      "job_id": null,
+      "dependency": null,
+      "stdout": "/home/ratnayn/codex/mIF-pipeline/logs/slurm/20260413_153544/phase2-chunk_1.out",
+      "stderr": "/home/ratnayn/codex/mIF-pipeline/logs/slurm/20260413_153544/phase2-chunk_1.err",
+      "command": "bash /home/ratnayn/codex/mIF-pipeline/scripts/run_pipeline.sh --config prototyping/prototype_v2-Crop.yaml --stage nimbus --chunk 1 --slide SLIDE-0329_crop_2048 --slide SLIDE-0329_crop_2048_2",
+      "status": "planned"
+    },
+    {
+      "phase": "phase2",
+      "target": "chunk_2",
+      "job_id": null,
+      "dependency": null,
+      "stdout": "/home/ratnayn/codex/mIF-pipeline/logs/slurm/20260413_153544/phase2-chunk_2.out",
+      "stderr": "/home/ratnayn/codex/mIF-pipeline/logs/slurm/20260413_153544/phase2-chunk_2.err",
+      "command": "bash /home/ratnayn/codex/mIF-pipeline/scripts/run_pipeline.sh --config prototyping/prototype_v2-Crop.yaml --stage nimbus --chunk 2 --slide SLIDE-0329_crop_2048 --slide SLIDE-0329_crop_2048_2",
+      "status": "planned"
+    },
+    {
+      "phase": "phase2",
+      "target": "chunk_3",
+      "job_id": null,
+      "dependency": null,
+      "stdout": "/home/ratnayn/codex/mIF-pipeline/logs/slurm/20260413_153544/phase2-chunk_3.out",
+      "stderr": "/home/ratnayn/codex/mIF-pipeline/logs/slurm/20260413_153544/phase2-chunk_3.err",
+      "command": "bash /home/ratnayn/codex/mIF-pipeline/scripts/run_pipeline.sh --config prototyping/prototype_v2-Crop.yaml --stage nimbus --chunk 3 --slide SLIDE-0329_crop_2048 --slide SLIDE-0329_crop_2048_2",
+      "status": "planned"
+    },
+    {
+      "phase": "phase3",
+      "target": "finalize",
+      "job_id": null,
+      "dependency": null,
+      "stdout": "/home/ratnayn/codex/mIF-pipeline/logs/slurm/20260413_153544/phase3-finalize.out",
+      "stderr": "/home/ratnayn/codex/mIF-pipeline/logs/slurm/20260413_153544/phase3-finalize.err",
+      "command": "bash /home/ratnayn/codex/mIF-pipeline/scripts/run_pipeline.sh --config prototyping/prototype_v2-Crop.yaml --stage nimbus-finalize --slide SLIDE-0329_crop_2048 --slide SLIDE-0329_crop_2048_2",
+      "status": "planned"
+    },
+    {
+      "phase": "phase4",
+      "target": "SLIDE-0329_crop_2048",
+      "job_id": null,
+      "dependency": null,
+      "stdout": "/home/ratnayn/codex/mIF-pipeline/logs/slurm/20260413_153544/phase4-SLIDE-0329_crop_2048.out",
+      "stderr": "/home/ratnayn/codex/mIF-pipeline/logs/slurm/20260413_153544/phase4-SLIDE-0329_crop_2048.err",
+      "command": "bash /home/ratnayn/codex/mIF-pipeline/scripts/run_pipeline.sh --config prototyping/prototype_v2-Crop.yaml --slide SLIDE-0329_crop_2048 --stage spatialdata --stage qc",
+      "status": "planned"
+    },
+    {
+      "phase": "phase4",
+      "target": "SLIDE-0329_crop_2048_2",
+      "job_id": null,
+      "dependency": null,
+      "stdout": "/home/ratnayn/codex/mIF-pipeline/logs/slurm/20260413_153544/phase4-SLIDE-0329_crop_2048_2.out",
+      "stderr": "/home/ratnayn/codex/mIF-pipeline/logs/slurm/20260413_153544/phase4-SLIDE-0329_crop_2048_2.err",
+      "command": "bash /home/ratnayn/codex/mIF-pipeline/scripts/run_pipeline.sh --config prototyping/prototype_v2-Crop.yaml --slide SLIDE-0329_crop_2048_2 --stage spatialdata --stage qc",
+      "status": "planned"
+    }
+  ]
+}

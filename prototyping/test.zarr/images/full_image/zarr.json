@@ -1,0 +1,217 @@
+{
+  "attributes": {
+    "ome": {
+      "omero": {
+        "channels": [
+          {
+            "label": "R1_CY3_AF_I"
+          },
+          {
+            "label": "R1_CY5_AF_I"
+          },
+          {
+            "label": "R1_CY7_AF_I"
+          },
+          {
+            "label": "R1_FITC_AF_I"
+          },
+          {
+            "label": "R1_BIT2_RS0584_CY3B"
+          },
+          {
+            "label": "R1_BIT3_RS0015_CY5"
+          },
+          {
+            "label": "R1_BIT4_RS0083_750"
+          },
+          {
+            "label": "R1_DAPI"
+          },
+          {
+            "label": "R1_BIT1_RS0996_488"
+          },
+          {
+            "label": "R2_BIT6_RS0639_CY3B"
+          },
+          {
+            "label": "R2_BIT7_RS0109_CY5"
+          },
+          {
+            "label": "R2_BIT8_RS0255_750"
+          },
+          {
+            "label": "R2_DAPI"
+          },
+          {
+            "label": "R2_BIT5_RS1047_488"
+          },
+          {
+            "label": "R3_BIT10_RS0763_CY3B"
+          },
+          {
+            "label": "R3_BIT11_RS1312_CY5"
+          },
+          {
+            "label": "R3_BIT12_RS0237_750"
+          },
+          {
+            "label": "R3_DAPI"
+          },
+          {
+            "label": "R3_BIT9_RS0805_488"
+          },
+          {
+            "label": "R4_P19_POLYRAT"
+          },
+          {
+            "label": "R4_ANXA10_647"
+          },
+          {
+            "label": "R4_LGALS4_750"
+          },
+          {
+            "label": "R4_DAPI"
+          },
+          {
+            "label": "R4_GFP_POLY_AF488"
+          }
+        ]
+      },
+      "version": "0.5-dev-spatialdata",
+      "multiscales": [
+        {
+          "datasets": [
+            {
+              "path": "0",
+              "coordinateTransformations": [
+                {
+                  "type": "scale",
+                  "scale": [
+                    1.0,
+                    1.0,
+                    1.0
+                  ]
+                }
+              ]
+            },
+            {
+              "path": "1",
+              "coordinateTransformations": [
+                {
+                  "type": "scale",
+                  "scale": [
+                    1.0,
+                    2.0,
+                    2.0
+                  ]
+                }
+              ]
+            },
+            {
+              "path": "2",
+              "coordinateTransformations": [
+                {
+                  "type": "scale",
+                  "scale": [
+                    1.0,
+                    4.0,
+                    4.0
+                  ]
+                }
+              ]
+            },
+            {
+              "path": "3",
+              "coordinateTransformations": [
+                {
+                  "type": "scale",
+                  "scale": [
+                    1.0,
+                    8.0,
+                    8.0
+                  ]
+                }
+              ]
+            },
+            {
+              "path": "4",
+              "coordinateTransformations": [
+                {
+                  "type": "scale",
+                  "scale": [
+                    1.0,
+                    16.0,
+                    16.0
+                  ]
+                }
+              ]
+            }
+          ],
+          "name": "/images/full_image",
+          "axes": [
+            {
+              "name": "c",
+              "type": "channel"
+            },
+            {
+              "name": "y",
+              "type": "space"
+            },
+            {
+              "name": "x",
+              "type": "space"
+            }
+          ],
+          "coordinateTransformations": [
+            {
+              "type": "identity",
+              "input": {
+                "name": "cyx",
+                "axes": [
+                  {
+                    "name": "c",
+                    "type": "channel"
+                  },
+                  {
+                    "name": "y",
+                    "type": "space",
+                    "unit": "unit"
+                  },
+                  {
+                    "name": "x",
+                    "type": "space",
+                    "unit": "unit"
+                  }
+                ]
+              },
+              "output": {
+                "name": "global",
+                "axes": [
+                  {
+                    "name": "c",
+                    "type": "channel"
+                  },
+                  {
+                    "name": "y",
+                    "type": "space",
+                    "unit": "unit"
+                  },
+                  {
+                    "name": "x",
+                    "type": "space",
+                    "unit": "unit"
+                  }
+                ]
+              }
+            }
+          ]
+        }
+      ]
+    },
+    "spatialdata_attrs": {
+      "version": "0.3"
+    }
+  },
+  "zarr_format": 3,
+  "node_type": "group"
+}

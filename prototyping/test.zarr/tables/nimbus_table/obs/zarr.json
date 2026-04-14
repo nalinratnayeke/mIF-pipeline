@@ -1,0 +1,15 @@
+{
+  "attributes": {
+    "column-order": [
+      "cell_id",
+      "fov",
+      "instance_id",
+      "region"
+    ],
+    "_index": "instance_id",
+    "encoding-type": "dataframe",
+    "encoding-version": "0.2.0"
+  },
+  "zarr_format": 3,
+  "node_type": "group"
+}

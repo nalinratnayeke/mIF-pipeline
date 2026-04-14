@@ -1,74 +1,88 @@
-slides_root: /data1/lowes/ratnayn/Data/CellDive_analysis_data/work
-instanseg_env: instanseg
-nimbus_env: nimbus
+# Shared defaults applied to each slide unless that slide overrides them.
+pixel_size_um: 0.325
+
+setup:
+  channel_patterns: ["*.tif"]
+  channel_map_output: channel_map.generated.json
+  include_round_in_alias: true
+
+seg_merge:
+  enabled: true
+  channels: [R0_DAPI, R0_PANCK, R0_CD45]
+  suffix: _segment_merge.ome.tif
+  compression: zlib
+  tile: [256, 256]
+  bigtiff: true
+
+full_merge:
+  enabled: true
+  exclude_channels: []
+  suffix: _full_merge.ome.tif
+  compression: zlib
+  tile: [256, 256]
+  bigtiff: true
+
+instanseg:
+  model: fluorescence_nuclei_and_cells
+  mode: wsi
+  prediction_tag: _instanseg_prediction
+  tile_size: 2048
+  overlap: 100
+  batch_size: 1
+  resolve_cell_and_nucleus: true
+  cleanup_fragments: true
+  seed_threshold: 0.6
+  planes:
+    nuclei_plane: 0
+    cells_plane: 1
+
+mask_export:
+  mask_dir: masks_whole_cell
+  suffix: _whole_cell.tiff
+  nuclear_suffix: _nuclear.tiff
+  bigtiff: true
+  compression: zlib
+  tile: [256, 256]
+
+nimbus:
+  enabled: true
+  output_dir: nimbus
+  # Use either channels or exclude_channels. Aliases should match
+  # setup-generated channel_map aliases.
+  channels: [R0_DAPI, R0_PANCK, R0_CD45]
+  # exclude_channels: []
+  channel_chunk_size: 1
+  join_keys: [fov, cell_id]
+  batch_size: 16
+  save_predictions: true
+  compile_model: false
+  quantile: 0.999
+  n_subset: 50
+  clip_values: [0, 2]
+  multiprocessing: true
+  multislide:
+    enabled: false
+    output_dir: /data1/lowes/ratnayn/Data/CellDive_analysis_data/work/nimbus_multislide
+    per_slide_output_dirname: per_slide
+
+spatialdata:
+  enabled: false
+  suffix: _spatialdata.sdata.zarr
+  aggregate_raster: true
+  aggregate_vector: false
+  load_nimbus: true
+  # Use either channels or exclude_channels for aggregation features.
+  # If neither is set, all full-merge channels are aggregated.
+  # channels: [R0_DAPI, R0_PANCK]
+  # exclude_channels: []
 
 slides:
   SLIDE-0272:
-    slide_dir: /data1/lowes/ratnayn/Data/CellDive_analysis_data/work/SLIDE-0272
-    pixel_size_um: 0.325
+    slide_dir: /data1/lowes/ratnayn/Data/CellDive_analysis_data/image_data/SLIDE-0272
+    output_dir: /data1/lowes/ratnayn/Data/CellDive_analysis_data/work/SLIDE-0272
+    channel_map_file: channel_map.generated.json
 
-    # Preferred explicit mapping source (can be generated via `mif-pipeline setup`)
-    channel_map_file: /workspace/mIF-pipeline/channel_map.example.json
-
-    # Optional setup phase to auto-generate starting mapping from a folder.
-    setup:
-      channel_source_dir: /data1/lowes/ratnayn/Data/CellDive_analysis_data/image_data/SLIDE-0272
-      channel_patterns: ["*.tif"]
-      channel_map_output: /data1/lowes/ratnayn/Data/CellDive_analysis_data/work/SLIDE-0272/channel_map.generated.json
-
-    seg_merge:
-      enabled: true
-      channels: [R0_DAPI, R0_PANCK, R0_CD45]
-      ome_path: /data1/lowes/ratnayn/Data/CellDive_analysis_data/work/SLIDE-0272/SLIDE-0272_segment_merge.ome.tif
-      compression: zlib
-      tile: [256, 256]
-      bigtiff: true
-
-    full_merge:
-      enabled: true
-      channels: [R0_DAPI, R0_PANCK, R0_CD45]
-      ome_path: /data1/lowes/ratnayn/Data/CellDive_analysis_data/work/SLIDE-0272/SLIDE-0272_full_merge.ome.tif
-      compression: zlib
-      tile: [256, 256]
-      bigtiff: true
-
-    instanseg:
-      model: fluorescence_nuclei_and_cells
-      prediction_tag: _instanseg_prediction
-      tile_size: 2048
-      overlap: 100
-      resolve_cell_and_nucleus: true
-      cleanup_fragments: true
-      seed_threshold: 0.6
-      planes:
-        nuclei_plane: 0
-        cells_plane: 1
-
-    mask_export:
-      mask_dir: /data1/lowes/ratnayn/Data/CellDive_analysis_data/work/SLIDE-0272/masks_whole_cell
-      suffix: _whole_cell.tiff
-      nuclear_suffix: _nuclear.tiff
-      bigtiff: true
-      compression: zlib
-      tile: [256, 256]
-
-    nimbus:
-      enabled: true
-      image_paths: []
-      image_globs:
-        - /data1/lowes/ratnayn/Data/CellDive_analysis_data/image_data/SLIDE-0272/*.tif
-      image_root: null
-      image_extensions: ["*.tif", "*.tiff", "*.ome.tiff"]
-
-      output_dir: /data1/lowes/ratnayn/Data/CellDive_analysis_data/work/SLIDE-0272/nimbus
-      # Aliases should match setup-generated channel_map aliases (e.g., R0_DAPI).
-      channels: [R0_DAPI, R0_PANCK, R0_CD45]
-      channel_chunk_size: 1
-      join_keys: [fov, cell_id]
-      batch_size: 16
-      save_predictions: true
-
-      quantile: 0.999
-      n_subset: 50
-      clip_values: [0, 2]
-      multiprocessing: true
+  SLIDE-0273:
+    slide_dir: /data1/lowes/ratnayn/Data/CellDive_analysis_data/image_data/SLIDE-0273
+    output_dir: /data1/lowes/ratnayn/Data/CellDive_analysis_data/work/SLIDE-0273
+    channel_map_file: channel_map.generated.json
