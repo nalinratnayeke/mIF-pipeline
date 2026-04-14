@@ -575,7 +575,7 @@ def test_downsample2x_mean_and_rebuild_pyramid_levels():
     assert [level.shape for level in levels] == [(4, 4), (2, 2), (1, 1)]
 
 
-def test_downsample2x_mean_preserves_odd_edge_shapes():
+def test_downsample2x_mean_crops_odd_edge_shapes():
     array = np.array(
         [
             [0, 2, 4, 6, 8],
@@ -588,11 +588,11 @@ def test_downsample2x_mean_preserves_odd_edge_shapes():
     downsampled = _downsample2x_mean(array)
 
     assert downsampled.dtype == np.uint16
-    assert downsampled.shape == (2, 3)
-    assert downsampled.tolist() == [[6, 10, 13], [21, 25, 28]]
+    assert downsampled.shape == (1, 2)
+    assert downsampled.tolist() == [[6, 10]]
 
     levels = _rebuild_pyramid_levels(array, 3)
-    assert [level.shape for level in levels] == [(3, 5), (2, 3), (1, 2)]
+    assert [level.shape for level in levels] == [(3, 5), (1, 2), (0, 1)]
 
 
 def test_merge_rebuilds_pyramid_from_level0_only(tmp_path: Path, monkeypatch):

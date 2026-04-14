@@ -68,29 +68,20 @@ def _read_level0_yx(path: Union[str, Path]):
 
 
 def _downsample2x_mean(array: Any) -> Any:
-    """2x downsample by averaging available 2x2 neighborhoods, preserving odd-edge pixels."""
+    """2x downsample by averaging 2x2 neighborhoods, cropping odd edges first."""
     import numpy as np
 
-    float_array = array.astype("float32", copy=False)
-    downsampled = float_array[0::2, 0::2].copy()
-    counts = np.ones_like(downsampled, dtype="float32")
-
-    bottom = float_array[1::2, 0::2]
-    if bottom.size:
-        downsampled[: bottom.shape[0], :] += bottom
-        counts[: bottom.shape[0], :] += 1.0
-
-    right = float_array[0::2, 1::2]
-    if right.size:
-        downsampled[:, : right.shape[1]] += right
-        counts[:, : right.shape[1]] += 1.0
-
-    bottom_right = float_array[1::2, 1::2]
-    if bottom_right.size:
-        downsampled[: bottom_right.shape[0], : bottom_right.shape[1]] += bottom_right
-        counts[: bottom_right.shape[0], : bottom_right.shape[1]] += 1.0
-
-    downsampled = downsampled / counts
+    y, x = array.shape
+    y2 = y - (y % 2)
+    x2 = x - (x % 2)
+    even_array = array[:y2, :x2]
+    float_array = even_array.astype("float32", copy=False)
+    downsampled = (
+        float_array[0::2, 0::2]
+        + float_array[1::2, 0::2]
+        + float_array[0::2, 1::2]
+        + float_array[1::2, 1::2]
+    ) / 4.0
     return downsampled.astype(array.dtype, copy=False)
 
 
