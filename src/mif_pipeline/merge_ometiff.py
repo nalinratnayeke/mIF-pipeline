@@ -75,13 +75,11 @@ def _downsample2x_mean(array: Any) -> Any:
     y2 = y - (y % 2)
     x2 = x - (x % 2)
     even_array = array[:y2, :x2]
-    float_array = even_array.astype("float32", copy=False)
-    downsampled = (
-        float_array[0::2, 0::2]
-        + float_array[1::2, 0::2]
-        + float_array[0::2, 1::2]
-        + float_array[1::2, 1::2]
-    ) / 4.0
+    downsampled = even_array[0::2, 0::2].astype(np.uint32, copy=True)
+    downsampled += even_array[1::2, 0::2].astype(np.uint32, copy=False)
+    downsampled += even_array[0::2, 1::2].astype(np.uint32, copy=False)
+    downsampled += even_array[1::2, 1::2].astype(np.uint32, copy=False)
+    downsampled //= 4
     return downsampled.astype(array.dtype, copy=False)
 
 
@@ -121,6 +119,63 @@ def _validate_rebuilt_level_shapes(
         raise ValueError(
             f"Rebuilt pyramid level shapes mismatch for {image_path}: "
             f"{rebuilt_shapes} != {list(reference_level_shapes)}."
+        )
+
+
+def _validate_level_shape(image_path: Path, level: Any, expected_shape: tuple[int, int], level_index: int) -> None:
+    shape = tuple(level.shape)
+    if shape != expected_shape:
+        raise ValueError(
+            f"Rebuilt pyramid level shape mismatch for {image_path} at level {level_index}: "
+            f"{shape} != {expected_shape}."
+        )
+
+
+def _write_channel_with_rebuilt_pyramid(
+    *,
+    writer: Any,
+    image_path: Path,
+    array: Any,
+    channel_name: str,
+    channel_index: int,
+    channel_count: int,
+    reference_level_shapes: Sequence[tuple[int, int]],
+    tile_value: tuple[int, int],
+    compression: str,
+    description: Optional[str] = None,
+) -> None:
+    _merge_status(
+        f"[merge] channel {channel_index}/{channel_count} {channel_name}: rebuilding pyramid"
+    )
+    _validate_level_shape(image_path, array, reference_level_shapes[0], 0)
+
+    write_kwargs: dict[str, Any] = {
+        "tile": tile_value,
+        "compression": compression,
+        "photometric": "minisblack",
+        "metadata": None,
+    }
+    if description is not None:
+        write_kwargs["description"] = description
+    if len(reference_level_shapes) > 1:
+        write_kwargs["subifds"] = len(reference_level_shapes) - 1
+    writer.write(array, **write_kwargs)
+    _merge_status(f"[merge] channel {channel_index}/{channel_count} {channel_name}: wrote level 0")
+
+    current = array
+    for level_index, expected_shape in enumerate(reference_level_shapes[1:], start=1):
+        current = _downsample2x_mean(current)
+        _validate_level_shape(image_path, current, expected_shape, level_index)
+        writer.write(
+            current,
+            tile=tile_value,
+            compression=compression,
+            photometric="minisblack",
+            subfiletype=1,
+            metadata=None,
+        )
+        _merge_status(
+            f"[merge] channel {channel_index}/{channel_count} {channel_name}: wrote pyramid level {level_index}/{len(reference_level_shapes) - 1}"
         )
 
 
@@ -246,34 +301,22 @@ def merge_single_channel_ometiffs_preserve_metadata_streaming(
         _merge_status(
             f"[merge] writing {output.name}: {len(inputs)} channels, {len(reference_level_shapes)} pyramid levels"
         )
-        first_levels = _rebuild_pyramid_levels(first, len(reference_level_shapes))
-        _validate_rebuilt_level_shapes(inputs[0], first_levels, reference_level_shapes)
         _merge_status(
-            f"[merge] channel 1/{len(inputs)} {channel_names[0]}: read level 0, rebuilding pyramid"
+            f"[merge] channel 1/{len(inputs)} {channel_names[0]}: read level 0"
         )
-        first_write_kwargs: dict[str, Any] = {
-            "tile": tile_value,
-            "compression": compression,
-            "photometric": "minisblack",
-            "description": ome_description,
-            "metadata": None,
-        }
-        if len(reference_level_shapes) > 1:
-            first_write_kwargs["subifds"] = len(reference_level_shapes) - 1
-        writer.write(first_levels[0], **first_write_kwargs)
-        _merge_status(f"[merge] channel 1/{len(inputs)} {channel_names[0]}: wrote level 0")
-        for level_index, level_array in enumerate(first_levels[1:], start=1):
-            writer.write(
-                level_array,
-                tile=tile_value,
-                compression=compression,
-                photometric="minisblack",
-                subfiletype=1,
-                metadata=None,
-            )
-            _merge_status(
-                f"[merge] channel 1/{len(inputs)} {channel_names[0]}: wrote pyramid level {level_index}/{len(reference_level_shapes) - 1}"
-            )
+        _write_channel_with_rebuilt_pyramid(
+            writer=writer,
+            image_path=inputs[0],
+            array=first,
+            channel_name=channel_names[0],
+            channel_index=1,
+            channel_count=len(inputs),
+            reference_level_shapes=reference_level_shapes,
+            tile_value=tile_value,
+            compression=compression,
+            description=ome_description,
+        )
+        del first
         for channel_index, image_path in enumerate(inputs[1:], start=2):
             level_shapes = _get_level_shapes(image_path)
             if level_shapes != reference_level_shapes:
@@ -293,35 +336,18 @@ def merge_single_channel_ometiffs_preserve_metadata_streaming(
                 raise ValueError(
                     f"Dtype mismatch: {image_path} has {array.dtype}, expected {reference_dtype}."
                 )
-            rebuilt_levels = _rebuild_pyramid_levels(array, len(reference_level_shapes))
-            _validate_rebuilt_level_shapes(image_path, rebuilt_levels, reference_level_shapes)
-            _merge_status(
-                f"[merge] channel {channel_index}/{len(inputs)} {channel_names[channel_index - 1]}: rebuilding pyramid"
+            _write_channel_with_rebuilt_pyramid(
+                writer=writer,
+                image_path=image_path,
+                array=array,
+                channel_name=channel_names[channel_index - 1],
+                channel_index=channel_index,
+                channel_count=len(inputs),
+                reference_level_shapes=reference_level_shapes,
+                tile_value=tile_value,
+                compression=compression,
             )
-            write_kwargs: dict[str, Any] = {
-                "tile": tile_value,
-                "compression": compression,
-                "photometric": "minisblack",
-                "metadata": None,
-            }
-            if len(reference_level_shapes) > 1:
-                write_kwargs["subifds"] = len(reference_level_shapes) - 1
-            writer.write(rebuilt_levels[0], **write_kwargs)
-            _merge_status(
-                f"[merge] channel {channel_index}/{len(inputs)} {channel_names[channel_index - 1]}: wrote level 0"
-            )
-            for level_index, level_array in enumerate(rebuilt_levels[1:], start=1):
-                writer.write(
-                    level_array,
-                    tile=tile_value,
-                    compression=compression,
-                    photometric="minisblack",
-                    subfiletype=1,
-                    metadata=None,
-                )
-                _merge_status(
-                    f"[merge] channel {channel_index}/{len(inputs)} {channel_names[channel_index - 1]}: wrote pyramid level {level_index}/{len(reference_level_shapes) - 1}"
-                )
+            del array
 
     _merge_status(f"[merge] finished {output}")
 
