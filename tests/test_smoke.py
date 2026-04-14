@@ -494,6 +494,26 @@ def test_generate_channel_map_readds_round_when_marker_repeats(tmp_path: Path):
     assert [entry["alias"] for entry in generated] == ["R0_DAPI", "R1_DAPI"]
 
 
+def test_generate_channel_map_preserves_dapi_autofluorescence_marker(tmp_path: Path):
+    source_dir = tmp_path / "source"
+    source_dir.mkdir()
+    (source_dir / "SLIDE-0272_1.0.1_R000_DAPI_AF_F.tif").write_bytes(b"fake")
+
+    generated = generate_channel_map(source_dir, ["*.tif"])
+
+    assert [entry["alias"] for entry in generated] == ["R1_DAPI_AF"]
+
+
+def test_generate_channel_map_preserves_non_dapi_autofluorescence_marker(tmp_path: Path):
+    source_dir = tmp_path / "source"
+    source_dir.mkdir()
+    (source_dir / "SLIDE-0272_3.0.1_R000_FITC_AF_I.tif").write_bytes(b"fake")
+
+    generated = generate_channel_map(source_dir, ["*.tif"])
+
+    assert [entry["alias"] for entry in generated] == ["R3_FITC_AF"]
+
+
 def _write_test_pyramidal_ome(path: Path, level0: np.ndarray) -> None:
     level1 = _downsample2x_mean(level0)
     level2 = _downsample2x_mean(level1)

@@ -375,15 +375,24 @@ def infer_alias_from_name(name: str, *, include_round_in_alias: bool = True) -> 
         after = name
 
     marker = after
-    for delimiter in ("__", "_FINAL", "_Final", "_F_Tiled", "_AFR", "_FOV", "_F"):
+    for delimiter in ("__", "_FINAL", "_Final", "_F_Tiled", "_AFR", "_FOV"):
         if delimiter in marker:
             marker = marker.split(delimiter, 1)[0]
     marker = marker.strip("_- ")
 
     parts = [part for part in re.split(r"[_\s]+", marker) if part]
-    autofluorescence_suffix = len(parts) >= 3 and parts[1].upper() == "AF" and parts[2].upper() == "I"
-    if parts and parts[0].upper() in COMMON_DYES and len(parts) > 1 and not autofluorescence_suffix:
-        marker = "_".join(parts[1:])
+    # Drop trailing acquisition tokens such as `_F` / `_I` while preserving
+    # semantic markers like `DAPI_AF` and `FITC_AF`.
+    while len(parts) > 1 and parts[-1].upper() in {"F", "I"}:
+        parts = parts[:-1]
+
+    if parts and parts[0].upper() in COMMON_DYES and len(parts) > 1:
+        if parts[1].upper() == "AF":
+            marker = "_".join(parts[:2])
+        else:
+            marker = "_".join(parts[1:])
+    else:
+        marker = "_".join(parts)
 
     marker = re.sub(r"[^0-9A-Za-z]+", "_", marker).strip("_").upper() or "CHANNEL"
     if round_idx is None or not include_round_in_alias:
