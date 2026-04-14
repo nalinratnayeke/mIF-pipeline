@@ -208,7 +208,12 @@ def run_instanseg(
     print(f"[instanseg] prediction_tag={prediction_tag}", flush=True)
     print(f"[instanseg] eval_kwargs={eval_kwargs}", flush=True)
 
-    image_array, pixel_size_read = inst.read_image(str(ome_path))
+    image_array, pixel_size_read = inst.read_image(str(ome_path), processing_method="medium")
+    if isinstance(image_array, str):
+        raise ValueError(
+            f"InstanSeg read_image returned a path instead of an in-memory image for {ome_path}. "
+            "The pipeline expects medium-mode array loading here."
+        )
     pixel_size_for_eval = result["pixel_size_um"] if result["pixel_size_um"] is not None else pixel_size_read
     result["read_image_pixel_size_um"] = pixel_size_read
     print(
