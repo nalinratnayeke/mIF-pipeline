@@ -25,13 +25,13 @@ def _import_spatialdata():
     try:
         import spatialdata
         from spatialdata import SpatialData
-        from spatialdata.models import Labels2DModel, ShapesModel, TableModel
+        from spatialdata.models import Image2DModel, Labels2DModel, ShapesModel, TableModel
         from spatialdata.transformations import Scale, set_transformation
     except ImportError as exc:
         raise ImportError(
             "SpatialData build requires 'spatialdata' in the active environment."
         ) from exc
-    return spatialdata, SpatialData, Labels2DModel, ShapesModel, TableModel, Scale, set_transformation
+    return spatialdata, SpatialData, Image2DModel, Labels2DModel, ShapesModel, TableModel, Scale, set_transformation
 
 
 def _import_anndata():
@@ -56,6 +56,14 @@ def _import_pandas():
     except ImportError as exc:
         raise ImportError("SpatialData build requires 'pandas' in the active environment.") from exc
     return pd
+
+
+def _import_dask_array():
+    try:
+        import dask.array as da
+    except ImportError as exc:
+        raise ImportError("SpatialData build requires 'dask[array]' in the active environment.") from exc
+    return da
 
 
 def _mask_paths(slide: dict[str, Any]) -> tuple[Path, Path]:
@@ -106,6 +114,30 @@ def _aggregation_modes(spatialdata_block: dict[str, Any]) -> tuple[bool, bool]:
 
 def _load_nimbus(spatialdata_block: dict[str, Any]) -> bool:
     return bool(spatialdata_block.get("load_nimbus", True))
+
+
+def _image_chunk_shape(slide: dict[str, Any]) -> tuple[int, int, int]:
+    full_merge = slide.get("full_merge") or {}
+    tile = full_merge.get("tile", [256, 256])
+    if isinstance(tile, int):
+        return (1, int(tile), int(tile))
+    tile_y, tile_x = tuple(tile)
+    return (1, int(tile_y), int(tile_x))
+
+
+def _scale_factors_from_ome_levels(level_shapes: list[tuple[int, int]]) -> list[dict[str, int]]:
+    scale_factors: list[dict[str, int]] = []
+    for current_shape, next_shape in zip(level_shapes, level_shapes[1:]):
+        current_y, current_x = current_shape
+        next_y, next_x = next_shape
+        if next_y <= 0 or next_x <= 0:
+            raise ValueError(f"Invalid OME pyramid shape encountered: {next_shape}")
+        if current_y % next_y != 0 or current_x % next_x != 0:
+            raise ValueError(
+                f"Cannot derive integer scale factors from OME pyramid shapes {current_shape} -> {next_shape}."
+            )
+        scale_factors.append({"y": current_y // next_y, "x": current_x // next_x})
+    return scale_factors
 
 
 def _strip_channel_prefix(name: str) -> str:
@@ -359,6 +391,69 @@ def _record_timing(timings: dict[str, float], key: str, started_at: float) -> fl
     return perf_counter()
 
 
+def _load_full_image_lazy(
+    full_merge_path: Path,
+    *,
+    channel_names: list[str],
+    chunk_shape: tuple[int, int, int],
+    Image2DModel: Any,
+) -> tuple[Any, tuple[int, int], dict[str, Any]]:
+    tifffile = _import_tifffile()
+    da = _import_dask_array()
+    from dask import delayed
+
+    with tifffile.TiffFile(full_merge_path) as tif:
+        series = tif.series[0]
+        level0 = series.levels[0]
+        axes = str(level0.axes)
+        dtype = level0.dtype
+        channel_count = int(level0.shape[0])
+        level_shapes = [tuple(int(value) for value in level.shape[-2:]) for level in series.levels]
+
+    if axes != "CYX":
+        raise ValueError(f"Expected CYX axes in {full_merge_path}, found {axes!r}.")
+    if channel_count != len(channel_names):
+        raise ValueError(
+            f"Channel count mismatch for {full_merge_path}: image has {channel_count} channels, "
+            f"but {len(channel_names)} names were provided."
+        )
+
+    image_canvas = tuple(int(value) for value in level_shapes[0])
+
+    def _read_channel(channel_index: int) -> Any:
+        return tifffile.imread(full_merge_path, key=channel_index, level=0)
+
+    lazy_array = da.stack(
+        [
+            da.from_delayed(
+                delayed(_read_channel)(channel_index),
+                shape=image_canvas,
+                dtype=dtype,
+            )
+            for channel_index in range(channel_count)
+        ],
+        axis=0,
+    ).rechunk(chunk_shape)
+
+    scale_factors = _scale_factors_from_ome_levels(level_shapes)
+    full_image = Image2DModel.parse(
+        lazy_array,
+        dims=("c", "y", "x"),
+        c_coords=channel_names,
+        chunks=chunk_shape,
+        scale_factors=scale_factors,
+    )
+    details = {
+        "axes": axes,
+        "source_shape": tuple(int(value) for value in lazy_array.shape),
+        "source_chunks": tuple(tuple(int(v) for v in axis) for axis in lazy_array.chunks),
+        "requested_chunks": chunk_shape,
+        "scale_factors": scale_factors,
+        "level_count": len(level_shapes),
+    }
+    return full_image, image_canvas, details
+
+
 def build_spatialdata(
     config: Union[dict[str, Any], str, Path],
     slide_id: str,
@@ -387,8 +482,7 @@ def build_spatialdata(
         result["dry_run"] = False
         return result
 
-    sopa = _import_sopa()
-    spatialdata, SpatialData, Labels2DModel, ShapesModel, TableModel, Scale, set_transformation = _import_spatialdata()
+    spatialdata, SpatialData, Image2DModel, Labels2DModel, ShapesModel, TableModel, Scale, set_transformation = _import_spatialdata()
     tifffile = _import_tifffile()
 
     full_merge_path = paths["full_merge_path"]
@@ -397,6 +491,7 @@ def build_spatialdata(
     nimbus_table_path = paths["nimbus_table_path"]
     pixel_size_um = float(slide["pixel_size_um"])
     aggregation_aliases = _selected_aliases(config, slide_id)
+    chunk_shape = _image_chunk_shape(slide)
     aggregate_raster, aggregate_vector = _aggregation_modes(spatialdata_block)
     load_nimbus = _load_nimbus(spatialdata_block)
     ad = _import_anndata() if load_nimbus else None
@@ -411,11 +506,12 @@ def build_spatialdata(
         raise FileNotFoundError(nimbus_table_path)
 
     print(f"[spatialdata] loading image: {full_merge_path}", flush=True)
-    image_sdata = sopa.io.ome_tif(full_merge_path)
-    image_key = next(iter(image_sdata.images.keys()))
-    full_image = image_sdata.images[image_key]
-    scale0 = full_image["scale0"]["image"]
-    image_canvas = tuple(int(value) for value in scale0.shape[-2:])
+    full_image, image_canvas, image_details = _load_full_image_lazy(
+        full_merge_path,
+        channel_names=aggregation_aliases,
+        chunk_shape=chunk_shape,
+        Image2DModel=Image2DModel,
+    )
     step_started = _record_timing(timings, "image_load_seconds", started_at)
 
     print(f"[spatialdata] loading masks for {slide_id}", flush=True)
@@ -490,6 +586,7 @@ def build_spatialdata(
         step_started = _record_timing(timings, "raster_aggregation_seconds", step_started)
 
     if aggregate_vector:
+        sopa = _import_sopa()
         print(f"[spatialdata] aggregating vector shapes for {list(sdata.shapes.keys())}", flush=True)
         for shape_name in list(sdata.shapes.keys()):
             table_name = _shape_table_name(shape_name)
@@ -556,8 +653,11 @@ def build_spatialdata(
         "status": "written",
         "dry_run": False,
         "pixel_size_um": pixel_size_um,
-        "image_key": image_key,
+        "image_key": "full_image",
         "full_merge_path": str(full_merge_path),
+        "image_chunks": image_details["requested_chunks"],
+        "image_source_chunks": image_details["source_chunks"],
+        "image_scale_factors": image_details["scale_factors"],
         "cell_mask_path": str(cell_mask_path),
         "nuclear_mask_path": str(nuclear_mask_path),
         "nimbus_table_path": str(nimbus_table_path),

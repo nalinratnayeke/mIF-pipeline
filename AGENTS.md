@@ -22,7 +22,7 @@ Implement a small, readable pipeline repo that:
    - **segmentation merge**: subset of channels for InstanSeg
    - **full merge**: all or most channels for later SpatialData import
 
-2. Runs InstanSeg WSI segmentation on the segmentation-merge OME-TIFF and writes the InstanSeg Zarr output.
+2. Runs InstanSeg on the segmentation-merge OME-TIFF using forced `medium` processing and writes full-resolution mask outputs directly.
 
 3. Exports full-resolution whole-cell instance masks as uint32 tiled BigTIFFs by upsampling InstanSeg label images with nearest-neighbor only.
 
@@ -209,7 +209,12 @@ The implementation already includes notebook-friendly exploration under `prototy
   - cells plane = 1
 
 ## InstanSeg runner requirements
-Use the working pattern from `Reference/instanseg_WSI_0272_test_v2.ipynb`.
+Use `Reference/instanseg_WSI_0272_test_v2.ipynb` only as the source of truth for the TiffSlide patch and the label upsampling/export details, not for the execution mode.
+
+Important override:
+- keep the pipeline on forced `medium` processing
+- do not switch the repo to `eval_whole_slide_image(...)`
+- do not make Zarr output the primary pipeline artifact unless I explicitly ask for that refactor
 
 Must include the known TiffSlide patch:
 

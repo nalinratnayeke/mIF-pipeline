@@ -145,6 +145,45 @@
                   ]
                 }
               ]
+            },
+            {
+              "path": "5",
+              "coordinateTransformations": [
+                {
+                  "type": "scale",
+                  "scale": [
+                    1.0,
+                    32.0,
+                    32.0
+                  ]
+                }
+              ]
+            },
+            {
+              "path": "6",
+              "coordinateTransformations": [
+                {
+                  "type": "scale",
+                  "scale": [
+                    1.0,
+                    64.0,
+                    64.0
+                  ]
+                }
+              ]
+            },
+            {
+              "path": "7",
+              "coordinateTransformations": [
+                {
+                  "type": "scale",
+                  "scale": [
+                    1.0,
+                    128.0,
+                    128.0
+                  ]
+                }
+              ]
             }
           ],
           "name": "/images/full_image",

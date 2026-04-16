@@ -10,8 +10,8 @@
     "configuration": {
       "chunk_shape": [
         1,
-        1024,
-        1024
+        256,
+        256
       ]
     }
   },

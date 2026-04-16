@@ -1,6 +1,7 @@
 {
   "attributes": {
     "column-order": [
+      "slide_id",
       "cell_id",
       "fov",
       "instance_id",

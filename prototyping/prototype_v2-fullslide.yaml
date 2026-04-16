@@ -1,0 +1,84 @@
+# Shared defaults applied to each slide unless that slide overrides them.
+pixel_size_um: 0.325
+
+setup:
+  channel_patterns: ["*.tif", "*.tiff", "*.ome.tif", "*.ome.tiff"]
+  channel_map_output: channel_map.generated.json
+  include_round_in_alias: true
+
+seg_merge:
+  enabled: true
+  channels: [R1_DAPI, R3_FITC_AF, R4_P19_POLYRAT, R4_GFP_POLY_AF488]
+  suffix: _segment_merge.ome.tif
+  compression: zlib
+  tile: [256, 256]
+  bigtiff: true
+
+full_merge:
+  enabled: true
+  exclude_channels: []
+  suffix: _full_merge.ome.tif
+  compression: zlib
+  tile: [256, 256]
+  bigtiff: true
+
+instanseg:
+  model: fluorescence_nuclei_and_cells
+  mode: medium
+  prediction_tag: _instanseg_prediction
+  tile_size: 2000
+  overlap: 100
+  batch_size: 10
+  resolve_cell_and_nucleus: true
+  cleanup_fragments: true
+  seed_threshold: 0.6
+  planes:
+    nuclei_plane: 0
+    cells_plane: 1
+
+mask_export:
+  mask_dir: masks
+  suffix: _whole_cell.tiff
+  nuclear_suffix: _nuclear.tiff
+  bigtiff: true
+  compression: zlib
+  tile: [256, 256]
+
+nimbus:
+  enabled: true
+  output_dir: nimbus
+  # Use either channels or exclude_channels. Aliases should match
+  # setup-generated channel_map aliases.
+  channels: [R1_DAPI, R4_GFP_POLY_AF488, R4_P19_POLYRAT, R4_ANXA10_647, R4_LGALS4_750]
+  # exclude_channels: []
+  channel_chunk_size: 1
+  join_keys: [fov, cell_id]
+  batch_size: 16
+  save_predictions: true
+  compile_model: false
+  quantile: 0.999
+  n_subset: 50
+  clip_values: [0, 2]
+  multiprocessing: true
+  multislide:
+    enabled: false
+    output_dir: /data1/lowes/ratnayn/Data/CellDive_analysis_data/pipeline_prototype/nimbus_multislide_SLIDE-0329
+    per_slide_output_dirname: per_slide
+    slide_ids: [SLIDE-0329]
+
+spatialdata:
+  enabled: true
+  suffix: _spatialdata.sdata.zarr
+  aggregate_raster: false
+  aggregate_vector: true
+  load_nimbus: true
+  # Use either channels or exclude_channels for aggregation features.
+  # If neither is set, all full-merge channels are aggregated.
+  channels: [R1_DAPI, R4_GFP_POLY_AF488, R4_P19_POLYRAT, R4_ANXA10_647]
+  # exclude_channels: []
+
+slides:
+  SLIDE-0329:
+    slide_dir: /mnt/c/analysis/Data_prototype/SLIDE-0329
+    output_dir: /mnt/c/analysis/Data_prototype/SLIDE-0329/outputs
+    channel_map_file: channel_map.generated.json
