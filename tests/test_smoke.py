@@ -854,6 +854,17 @@ def test_full_merge_can_exclude_channels(tmp_path: Path):
     full_merge = result["outputs"]["full_merge"]
     assert full_merge["channels"] == ["R0_DAPI"]
     assert full_merge["exclude_channels"] == ["R0_PANCK"]
+    assert full_merge["tile"] == [256, 256]
+
+
+def test_full_merge_defaults_to_512_tile(tmp_path: Path):
+    config_path = write_config(tmp_path)
+    config = load_config(config_path)
+    config["slides"]["SLIDE-0272"]["full_merge"].pop("tile")
+
+    result = merge_slide_ometiffs(config, "SLIDE-0272", dry_run=True)
+
+    assert result["outputs"]["full_merge"]["tile"] == [512, 512]
 
 
 def test_full_merge_channels_and_exclude_channels_are_mutually_exclusive(tmp_path: Path):

@@ -11,7 +11,7 @@ full_merge:
   exclude_channels: []
   suffix: _full.ome.tif
   compression: zlib
-  tile: [256, 256]
+  tile: [512, 512]
   bigtiff: true
 
 instanseg:
