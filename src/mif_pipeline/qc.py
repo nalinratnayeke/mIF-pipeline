@@ -43,22 +43,17 @@ def qc_slide(config: Union[dict[str, Any], str, Path], slide_id: str) -> dict[st
     def add_check(name: str, ok: bool, detail: str) -> None:
         checks.append({"name": name, "ok": bool(ok), "detail": detail})
 
-    seg_merge = slide.get("seg_merge") or {}
     full_merge = slide.get("full_merge") or {}
     instanseg_block = slide.get("instanseg") or {}
     mask_export = slide.get("mask_export") or {}
     nimbus_block = slide.get("nimbus") or {}
     spatialdata_block = slide.get("spatialdata") or {}
 
-    if seg_merge.get("enabled", False):
-        seg_path = Path(seg_merge["ome_path"])
-        add_check("seg_merge_exists", seg_path.exists(), str(seg_path))
-    else:
-        seg_path = None
-
     if full_merge.get("enabled", False):
         full_path = Path(full_merge["ome_path"])
         add_check("full_merge_exists", full_path.exists(), str(full_path))
+    else:
+        full_path = None
 
     expected_cell_masks = []
     expected_nuclear_masks = []
@@ -77,9 +72,9 @@ def qc_slide(config: Union[dict[str, Any], str, Path], slide_id: str) -> dict[st
         str(expected_nuclear_masks[0]) if expected_nuclear_masks else "no mask_export configured",
     )
 
-    if seg_path is not None and seg_path.exists() and expected_cell_masks and expected_cell_masks[0].exists():
+    if full_path is not None and full_path.exists() and expected_cell_masks and expected_cell_masks[0].exists():
         tifffile = _import_tifffile()
-        with tifffile.TiffFile(str(seg_path)) as handle:
+        with tifffile.TiffFile(str(full_path)) as handle:
             target_shape = tuple(int(value) for value in handle.pages[0].shape[-2:])
         with tifffile.TiffFile(str(expected_cell_masks[0])) as handle:
             mask_shape = tuple(int(value) for value in handle.pages[0].shape[-2:])

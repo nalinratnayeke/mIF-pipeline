@@ -5,23 +5,16 @@ setup:
   channel_patterns: ["*.tif", "*.tiff", "*.ome.tif", "*.ome.tiff"]
   channel_map_output: channel_map.generated.json
 
-seg_merge:
-  enabled: true
-  channels: [R1_DAPI, R1_FITC_AF_I, R1_CY3_AF_I, R1_CY5_AF_I, R1_CY7_AF_I]
-  suffix: _segment_merge.ome.tif
-  compression: zlib
-  tile: [256, 256]
-  bigtiff: true
-
 full_merge:
   enabled: true
   exclude_channels: []
-  suffix: _full_merge.ome.tif
+  suffix: _full.ome.tif
   compression: zlib
   tile: [256, 256]
   bigtiff: true
 
 instanseg:
+  channels: [R1_DAPI, R1_FITC_AF_I, R1_CY3_AF_I, R1_CY5_AF_I, R1_CY7_AF_I]
   model: fluorescence_nuclei_and_cells
   prediction_tag: _instanseg_prediction
   tile_size: 2000

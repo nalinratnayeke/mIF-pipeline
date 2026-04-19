@@ -97,7 +97,6 @@ The pipeline is configured with a YAML file like `example.yaml`.
 Top-level fields include shared defaults such as:
 - `pixel_size_um`
 - `setup`
-- `seg_merge`
 - `full_merge`
 - `instanseg`
 - `mask_export`
@@ -109,7 +108,6 @@ Each slide lives under `slides.<slide_id>` and includes:
 - `pixel_size_um`
 - `channel_map_file`
 - optional `setup`
-- `seg_merge`
 - `full_merge`
 - `instanseg`
 - `mask_export`
@@ -138,8 +136,8 @@ Example:
 ```
 
 In config:
-- `seg_merge.channels` refers to aliases
 - `full_merge.channels` refers to aliases
+- `instanseg.channels` refers to aliases
 - `nimbus.channels` refers to aliases
 
 The pipeline should resolve aliases through the channel map rather than hardcoding file paths.
@@ -168,17 +166,13 @@ slides:
       channel_map_output: channel_map.generated.json
       include_round_in_alias: true
 
-    seg_merge:
-      enabled: true
-      channels: [R0_DAPI, R0_PANCK, R0_CD45]
-      suffix: _segment_merge.ome.tif
-
     full_merge:
       enabled: true
       channels: [R0_DAPI, R0_PANCK, R0_CD45]
       suffix: _full_merge.ome.tif
 
     instanseg:
+      channels: [R0_DAPI, R0_PANCK, R0_CD45]
       model: fluorescence_nuclei_and_cells
       mode: medium
       prediction_tag: _instanseg_prediction
@@ -208,9 +202,13 @@ slides:
     spatialdata:
       enabled: false
       suffix: _spatialdata.sdata.zarr
-      aggregate_raster: true
-      aggregate_vector: false
+      aggregate: true
+      run_on_gpu: false
+      dask_scheduler: processes
+      derive_shapes: false
       load_nimbus: true
+      # Run this final assembly stage in a modern Harpy + SpatialData env
+      # after merge / InstanSeg / optional Nimbus artifacts already exist.
 ```
 
 ## Python API
@@ -229,6 +227,7 @@ from mif_pipeline.nimbus_runner import (
     run_nimbus_multislide,
 )
 from mif_pipeline.qc import qc_slide
+from mif_pipeline.spatialdata_builder import assemble_spatialdata
 ```
 
 Expected high-level functions:
@@ -240,9 +239,9 @@ Expected high-level functions:
 - `run_nimbus_chunked(config, slide_id) -> dict`
 - `run_nimbus_multislide(config, slide_ids=None, *, chunk_indices=None) -> dict`
 - `finalize_nimbus_multislide(config, slide_ids=None) -> dict`
-- `build_spatialdata(config, slide_id) -> dict`
+- `assemble_spatialdata(config, slide_id) -> dict`
 - `qc_slide(config, slide_id) -> dict`
-- `run_all(config, slide_id) -> dict`
+- `run_all(config, slide_id) -> dict` for same-environment stages only
 
 Each function should return a small dictionary of resolved paths and outputs so it is easy to inspect from a notebook.
 
@@ -610,7 +609,6 @@ Typical outputs:
 
 ```text
 SLIDE-0272/
-├─ SLIDE-0272_segment_merge.ome.tif
 ├─ SLIDE-0272_full_merge.ome.tif
 ├─ masks_whole_cell/
 │  ├─ SLIDE-0272_whole_cell.tiff

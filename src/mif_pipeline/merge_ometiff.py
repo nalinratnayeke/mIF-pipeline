@@ -375,7 +375,7 @@ def merge_slide_ometiffs(
     force: bool = False,
     dry_run: bool = False,
 ) -> dict[str, Any]:
-    """Create the configured segmentation and full merged OME-TIFFs."""
+    """Create the configured full merged OME-TIFF."""
     config = ensure_config(config)
     slide = get_slide_config(config, slide_id)
 
@@ -386,42 +386,42 @@ def merge_slide_ometiffs(
         "dry_run": dry_run,
     }
 
-    for block_name in ("seg_merge", "full_merge"):
-        block = slide.get(block_name) or {}
-        if not block.get("enabled", False):
-            result["outputs"][block_name] = {"status": "disabled"}
-            continue
+    block_name = "full_merge"
+    block = slide.get(block_name) or {}
+    if not block.get("enabled", False):
+        result["outputs"][block_name] = {"status": "disabled"}
+        return result
 
-        aliases = _resolve_merge_aliases(config, slide_id, block)
-        entries = resolve_channel_entries(config, slide_id, aliases)
-        ome_path = Path(block["ome_path"])
-        block_result = {
-            "status": "planned" if dry_run else "pending",
-            "ome_path": str(ome_path),
-            "channels": list(aliases),
-            "exclude_channels": list(block.get("exclude_channels") or []),
-            "input_paths": [entry["path"] for entry in entries],
-        }
-        result["outputs"][block_name] = block_result
-        if dry_run:
-            continue
+    aliases = _resolve_merge_aliases(config, slide_id, block)
+    entries = resolve_channel_entries(config, slide_id, aliases)
+    ome_path = Path(block["ome_path"])
+    block_result = {
+        "status": "planned" if dry_run else "pending",
+        "ome_path": str(ome_path),
+        "channels": list(aliases),
+        "exclude_channels": list(block.get("exclude_channels") or []),
+        "input_paths": [entry["path"] for entry in entries],
+    }
+    result["outputs"][block_name] = block_result
+    if dry_run:
+        return result
 
-        if ome_path.exists() and not force:
-            block_result["status"] = "skipped"
-            continue
+    if ome_path.exists() and not force:
+        block_result["status"] = "skipped"
+        return result
 
-        _merge_status(
-            f"[merge] starting {block_name} for {slide_id}: {len(entries)} channels -> {ome_path}"
-        )
-        merged = merge_single_channel_ometiffs_preserve_metadata_streaming(
-            inputs=[entry["path"] for entry in entries],
-            output=ome_path,
-            channel_names=list(aliases),
-            compression=block.get("compression", "zlib"),
-            tile=tuple(block.get("tile", [256, 256])),
-            bigtiff=bool(block.get("bigtiff", True)),
-        )
-        block_result["status"] = "written"
-        block_result["ome_path"] = str(merged)
+    _merge_status(
+        f"[merge] starting {block_name} for {slide_id}: {len(entries)} channels -> {ome_path}"
+    )
+    merged = merge_single_channel_ometiffs_preserve_metadata_streaming(
+        inputs=[entry["path"] for entry in entries],
+        output=ome_path,
+        channel_names=list(aliases),
+        compression=block.get("compression", "zlib"),
+        tile=tuple(block.get("tile", [256, 256])),
+        bigtiff=bool(block.get("bigtiff", True)),
+    )
+    block_result["status"] = "written"
+    block_result["ome_path"] = str(merged)
 
     return result

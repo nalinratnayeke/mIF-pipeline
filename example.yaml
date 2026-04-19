@@ -6,25 +6,18 @@ setup:
   channel_map_output: channel_map.generated.json
   include_round_in_alias: true
 
-seg_merge:
-  enabled: true
-  channels: [R0_DAPI, R0_PANCK, R0_CD45]
-  suffix: _segment_merge.ome.tif
-  compression: zlib
-  tile: [256, 256]
-  bigtiff: true
-
 full_merge:
   enabled: true
   exclude_channels: []
-  suffix: _full_merge.ome.tif
+  suffix: _full.ome.tif
   compression: zlib
   tile: [256, 256]
   bigtiff: true
 
 instanseg:
+  channels: [R0_DAPI, R0_PANCK, R0_CD45]
   model: fluorescence_nuclei_and_cells
-  mode: wsi
+  mode: medium
   prediction_tag: _instanseg_prediction
   tile_size: 2048
   overlap: 100
@@ -45,7 +38,7 @@ mask_export:
   tile: [256, 256]
 
 nimbus:
-  enabled: true
+  enabled: false
   output_dir: nimbus
   # Use either channels or exclude_channels. Aliases should match
   # setup-generated channel_map aliases.
@@ -68,13 +61,13 @@ nimbus:
 spatialdata:
   enabled: false
   suffix: _spatialdata.sdata.zarr
-  aggregate_raster: true
-  aggregate_vector: false
+  aggregate: true
+  run_on_gpu: false
+  dask_scheduler: processes
+  derive_shapes: false
   load_nimbus: true
-  # Use either channels or exclude_channels for aggregation features.
-  # If neither is set, all full-merge channels are aggregated.
-  # channels: [R0_DAPI, R0_PANCK]
-  # exclude_channels: []
+  # This stage is intended to run in a modern Harpy + SpatialData environment
+  # after merge / InstanSeg / optional Nimbus file artifacts already exist.
 
 slides:
   SLIDE-0272:

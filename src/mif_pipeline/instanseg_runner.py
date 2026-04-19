@@ -3,7 +3,7 @@ from __future__ import annotations
 from pathlib import Path
 from typing import Any, Union
 
-from .config import ensure_config, get_slide_config
+from .config import ensure_config, get_slide_config, resolve_block_aliases
 
 
 def _import_instanseg():
@@ -37,6 +37,63 @@ def _import_tifffile():
             "InstanSeg mask writing requires 'tifffile'. Install it in the active environment."
         ) from exc
     return tifffile
+
+
+def _extract_physical_size_x_um(ome_xml: str | None) -> float | None:
+    import re
+
+    if not ome_xml:
+        return None
+    match = re.search(r'PhysicalSizeX="([^"]+)"', ome_xml)
+    if match is None:
+        return None
+    return float(match.group(1))
+
+
+def _resolve_full_merge_aliases(config: dict[str, Any], slide_id: str, full_merge_block: dict[str, Any]) -> list[str]:
+    return resolve_block_aliases(
+        config,
+        slide_id,
+        full_merge_block,
+        block_name="full_merge",
+        require_selection=False,
+    )
+
+
+def _resolve_instanseg_aliases(config: dict[str, Any], slide_id: str, instanseg_block: dict[str, Any]) -> list[str]:
+    return resolve_block_aliases(
+        config,
+        slide_id,
+        instanseg_block,
+        block_name="InstanSeg block",
+        require_selection=True,
+    )
+
+
+def _read_selected_full_merge_channels(
+    ome_path: Path,
+    *,
+    channel_indices: list[int],
+):
+    import numpy as np
+
+    tifffile = _import_tifffile()
+    with tifffile.TiffFile(str(ome_path)) as handle:
+        series = handle.series[0]
+        level0 = series.levels[0]
+        pages = level0.pages
+        arrays = []
+        for channel_index in channel_indices:
+            array = pages[channel_index].asarray()
+            if array.ndim == 3 and array.shape[0] == 1:
+                array = array[0]
+            if array.ndim != 2:
+                raise ValueError(
+                    f"Expected 2D level-0 channel plane from {ome_path}, got shape {array.shape}."
+                )
+            arrays.append(array)
+        pixel_size_um = _extract_physical_size_x_um(handle.ome_metadata)
+    return np.stack(arrays, axis=0).astype(np.float32, copy=False), pixel_size_um
 
 
 def _instanseg_mode(instanseg_block: dict[str, Any]) -> str:
@@ -144,20 +201,32 @@ def run_instanseg(
     """Run medium-image InstanSeg inference and write full-resolution mask TIFFs."""
     config = ensure_config(config)
     slide = get_slide_config(config, slide_id)
-    seg_merge = slide.get("seg_merge") or {}
+    full_merge = slide.get("full_merge") or {}
     instanseg_block = slide.get("instanseg") or {}
 
-    if not seg_merge.get("enabled", False):
-        raise ValueError("seg_merge.enabled must be true before running InstanSeg.")
+    if not full_merge.get("enabled", False):
+        raise ValueError("full_merge.enabled must be true before running InstanSeg.")
 
-    ome_path = Path(seg_merge["ome_path"])
+    ome_path = Path(full_merge["ome_path"])
     prediction_tag = instanseg_block.get("prediction_tag", "_instanseg_prediction")
     mode = _instanseg_mode(instanseg_block)
     cell_mask_path, nuclear_mask_path = _mask_output_paths(slide)
+    instanseg_aliases = _resolve_instanseg_aliases(config, slide_id, instanseg_block)
+    full_merge_aliases = _resolve_full_merge_aliases(config, slide_id, full_merge)
+    alias_to_index = {alias: index for index, alias in enumerate(full_merge_aliases)}
+    missing = [alias for alias in instanseg_aliases if alias not in alias_to_index]
+    if missing:
+        raise ValueError(
+            "InstanSeg channels must be present in full_merge. Missing aliases: "
+            + ", ".join(missing)
+        )
+    instanseg_indices = [alias_to_index[alias] for alias in instanseg_aliases]
 
     result = {
         "slide_id": slide_id,
         "ome_path": str(ome_path),
+        "channels": list(instanseg_aliases),
+        "channel_indices": list(instanseg_indices),
         "mode": mode,
         "model": instanseg_block.get("model", "fluorescence_nuclei_and_cells"),
         "tile_size": int(instanseg_block.get("tile_size", 2048)),
@@ -179,7 +248,7 @@ def run_instanseg(
         return result
 
     if not ome_path.exists():
-        raise FileNotFoundError(f"Segmentation merge does not exist: {ome_path}")
+        raise FileNotFoundError(f"Full merge does not exist: {ome_path}")
     if cell_mask_path.exists() and nuclear_mask_path.exists() and not force:
         result["status"] = "skipped"
         print(
@@ -206,18 +275,17 @@ def run_instanseg(
         flush=True,
     )
     print(f"[instanseg] prediction_tag={prediction_tag}", flush=True)
+    print(f"[instanseg] channels={instanseg_aliases} indices={instanseg_indices}", flush=True)
     print(f"[instanseg] eval_kwargs={eval_kwargs}", flush=True)
 
-    image_array, pixel_size_read = inst.read_image(str(ome_path), processing_method="medium")
-    if isinstance(image_array, str):
-        raise ValueError(
-            f"InstanSeg read_image returned a path instead of an in-memory image for {ome_path}. "
-            "The pipeline expects medium-mode array loading here."
-        )
+    image_array, pixel_size_read = _read_selected_full_merge_channels(
+        ome_path,
+        channel_indices=instanseg_indices,
+    )
     pixel_size_for_eval = result["pixel_size_um"] if result["pixel_size_um"] is not None else pixel_size_read
     result["read_image_pixel_size_um"] = pixel_size_read
     print(
-        f"[instanseg] medium mode loaded image with pixel_size_um={pixel_size_read}; "
+        f"[instanseg] loaded selected channels from full_merge with pixel_size_um={pixel_size_read}; "
         f"using {pixel_size_for_eval} for eval_medium_image(...)",
         flush=True,
     )

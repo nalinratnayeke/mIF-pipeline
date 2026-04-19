@@ -16,7 +16,6 @@ COMMON_DYES = {"DAPI", "FITC", "TRITC", "CY3", "CY5", "CY7", "AF488", "AF555", "
 SLIDE_DEFAULT_KEYS = (
     "pixel_size_um",
     "setup",
-    "seg_merge",
     "full_merge",
     "instanseg",
     "mask_export",
@@ -37,6 +36,17 @@ def load_config(config_path: Union[str, Path]) -> dict[str, Any]:
         raise ValueError("Config must contain a top-level 'slides' mapping.")
     if "slides_root" in config:
         raise ValueError("Config may not define 'slides_root'. Set per-slide 'slide_dir' and 'output_dir' instead.")
+    if "seg_merge" in config:
+        raise ValueError(
+            "Legacy 'seg_merge' config is no longer supported. "
+            "Keep only 'full_merge' and move the segmentation channel list to 'instanseg.channels'."
+        )
+    for slide_id, slide in config["slides"].items():
+        if isinstance(slide, dict) and "seg_merge" in slide:
+            raise ValueError(
+                f"Slide {slide_id} uses legacy 'seg_merge' config. "
+                "Keep only 'full_merge' and move the segmentation channel list to 'instanseg.channels'."
+            )
 
     config["_meta"] = {
         "config_path": str(path),
@@ -201,21 +211,20 @@ def get_slide_config(config: dict[str, Any], slide_id: str) -> dict[str, Any]:
                 resolve_path(setup_block["channel_map_output"], output_dir)
             )
 
-    for block_name in ("seg_merge", "full_merge"):
-        block = resolved.get(block_name)
-        if isinstance(block, dict):
-            suffix = block.get("suffix")
-            legacy_ome_path = block.get("ome_path")
-            if suffix is not None and legacy_ome_path is not None:
-                raise ValueError(
-                    f"Slide {slide_id} {block_name} may define only one of 'suffix' or 'ome_path'."
-                )
-            if suffix is not None:
-                block["ome_path"] = str(resolve_slide_output_name(slide_id, suffix, output_dir))
-            elif legacy_ome_path is not None:
-                block["ome_path"] = str(
-                    resolve_legacy_slide_output_path(legacy_ome_path, output_dir, slide_id)
-                )
+    full_merge = resolved.get("full_merge")
+    if isinstance(full_merge, dict):
+        suffix = full_merge.get("suffix")
+        legacy_ome_path = full_merge.get("ome_path")
+        if suffix is not None and legacy_ome_path is not None:
+            raise ValueError(
+                f"Slide {slide_id} full_merge may define only one of 'suffix' or 'ome_path'."
+            )
+        if suffix is not None:
+            full_merge["ome_path"] = str(resolve_slide_output_name(slide_id, suffix, output_dir))
+        elif legacy_ome_path is not None:
+            full_merge["ome_path"] = str(
+                resolve_legacy_slide_output_path(legacy_ome_path, output_dir, slide_id)
+            )
 
     mask_export = resolved.get("mask_export")
     if isinstance(mask_export, dict) and mask_export.get("mask_dir") is not None:
@@ -530,7 +539,8 @@ def resolve_nimbus_multislide_inputs(
             fov_paths.append(normalized)
             fov_to_slide[normalized] = slide_id
 
-    output_dir_value = multislide_block.get("output_dir")
+    multislide_enabled = bool(multislide_block.get("enabled", False))
+    output_dir_value = multislide_block.get("output_dir") if multislide_enabled else None
     output_dir = str(resolve_path(output_dir_value, config["_meta"]["config_dir"])) if output_dir_value else None
     per_slide_output_dirname = str(multislide_block.get("per_slide_output_dirname", "per_slide"))
 

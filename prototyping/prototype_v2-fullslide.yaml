@@ -6,14 +6,6 @@ setup:
   channel_map_output: channel_map.generated.json
   include_round_in_alias: true
 
-seg_merge:
-  enabled: true
-  channels: [R1_DAPI, R3_FITC_AF, R4_P19_POLYRAT, R4_GFP_POLY_AF488]
-  suffix: _segment_merge.ome.tif
-  compression: zlib
-  tile: [256, 256]
-  bigtiff: true
-
 full_merge:
   enabled: true
   exclude_channels: []
@@ -23,6 +15,7 @@ full_merge:
   bigtiff: true
 
 instanseg:
+  channels: [R1_DAPI, R3_FITC_AF, R4_P19_POLYRAT, R4_GFP_POLY_AF488]
   model: fluorescence_nuclei_and_cells
   mode: medium
   prediction_tag: _instanseg_prediction
@@ -69,13 +62,13 @@ nimbus:
 spatialdata:
   enabled: true
   suffix: _spatialdata.sdata.zarr
-  aggregate_raster: false
-  aggregate_vector: true
+  aggregate: true
+  run_on_gpu: false
+  dask_scheduler: processes
+  derive_shapes: false
   load_nimbus: true
-  # Use either channels or exclude_channels for aggregation features.
-  # If neither is set, all full-merge channels are aggregated.
-  channels: [R1_DAPI, R4_GFP_POLY_AF488, R4_P19_POLYRAT, R4_ANXA10_647]
-  # exclude_channels: []
+  # This final assembly stage is intended for a modern Harpy + SpatialData env
+  # after merge / InstanSeg / optional Nimbus artifacts already exist.
 
 slides:
   SLIDE-0329:

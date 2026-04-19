@@ -12,7 +12,7 @@ from .nimbus_runner import finalize_nimbus_multislide, run_nimbus_chunked, run_n
 from .pipeline import run_all
 from .qc import qc_slide
 from .setup import setup_slide, setup_slides
-from .spatialdata_builder import build_spatialdata
+from .spatialdata_builder import assemble_spatialdata
 
 
 def _json_default(value: Any):
@@ -57,7 +57,10 @@ def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(prog="mif-pipeline")
     subparsers = parser.add_subparsers(dest="command", required=True)
 
-    run_parser = subparsers.add_parser("run", help="Run the full pipeline.")
+    run_parser = subparsers.add_parser(
+        "run",
+        help="Run same-environment stages only (setup, merge, InstanSeg, optional Nimbus, QC).",
+    )
     _add_common_arguments(run_parser)
 
     setup_parser = subparsers.add_parser("setup", help="Generate a starter channel map.")
@@ -149,8 +152,11 @@ def build_parser() -> argparse.ArgumentParser:
         help="Comma-separated slide IDs. Can be combined with repeated --slide.",
     )
 
-    spatialdata_parser = subparsers.add_parser("spatialdata", help="Build a SpatialData store.")
-    _add_common_arguments(spatialdata_parser)
+    assemble_parser = subparsers.add_parser(
+        "assemble-spatialdata",
+        help="Assemble the final SpatialData store from merged image artifacts, masks, and optional Nimbus outputs.",
+    )
+    _add_common_arguments(assemble_parser)
 
     qc_parser = subparsers.add_parser("qc", help="Run lightweight QC checks.")
     _add_common_arguments(qc_parser, include_force=False)
@@ -188,7 +194,12 @@ def main(argv: Optional[list[str]] = None) -> int:
             force=args.force,
         ),
         "nimbus-finalize": lambda: finalize_nimbus_multislide(config, _parse_slide_list(args)),
-        "spatialdata": lambda: build_spatialdata(config, args.slide, force=args.force, return_sdata=False),
+        "assemble-spatialdata": lambda: assemble_spatialdata(
+            config,
+            args.slide,
+            force=args.force,
+            return_sdata=False,
+        ),
         "qc": lambda: qc_slide(config, args.slide),
         "dry-run": lambda: run_all(config, args.slide, dry_run=True),
     }

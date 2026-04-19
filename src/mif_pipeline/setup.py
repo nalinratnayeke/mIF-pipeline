@@ -75,7 +75,13 @@ def _validate_matching_aliases(plans: list[dict[str, Any]]) -> list[str]:
 
 
 def _write_channel_map(output_path: Path, channel_map: list[dict[str, Any]]) -> None:
-    output_path.parent.mkdir(parents=True, exist_ok=True)
+    try:
+        output_path.parent.mkdir(parents=True, exist_ok=True)
+    except FileExistsError:
+        # Some mounted filesystems (for example /mnt/c under WSL) can still raise
+        # FileExistsError here even when the target directory already exists.
+        if not output_path.parent.is_dir():
+            raise
     with output_path.open("w", encoding="utf-8") as handle:
         json.dump(channel_map, handle, indent=2)
 

@@ -6,23 +6,16 @@ setup:
   channel_map_output: channel_map.generated.json
   include_round_in_alias: true
 
-seg_merge:
-  enabled: true
-  channels: [R1_DAPI, R1_FITC_AF_I, R1_CY3_AF_I, R1_CY5_AF_I, R1_CY7_AF_I]
-  suffix: _segment_merge.ome.tif
-  compression: zlib
-  tile: [256, 256]
-  bigtiff: true
-
 full_merge:
   enabled: true
   exclude_channels: []
-  suffix: _full_merge.ome.tif
+  suffix: _full.ome.tif
   compression: zlib
   tile: [256, 256]
   bigtiff: true
 
 instanseg:
+  channels: [R1_DAPI, R1_FITC_AF, R4_P19_POLYRAT, R4_ANXA10_647, R4_LGALS4_750]
   model: fluorescence_nuclei_and_cells
   mode: medium
   prediction_tag: _instanseg_prediction
@@ -62,28 +55,28 @@ nimbus:
   multiprocessing: true
   multislide:
     enabled: true
-    output_dir: /mnt/c/analysis/Data_prototype/nimbus_multislide
+    output_dir: /mnt/c/analysis/Data_prototype/crop_nimbus_multislide
     per_slide_output_dirname: per_slide
     slide_ids: [SLIDE-0329_crop_2048, SLIDE-0329_crop_2048_2]
 
 spatialdata:
   enabled: true
   suffix: _spatialdata.sdata.zarr
-  aggregate_raster: false
-  aggregate_vector: true
+  aggregate: true
+  run_on_gpu: false
+  dask_scheduler: processes
+  derive_shapes: true
   load_nimbus: true
-  # Use either channels or exclude_channels for aggregation features.
-  # If neither is set, all full-merge channels are aggregated.
-  channels: [R1_DAPI, R4_GFP_POLY_AF488, R4_P19_POLYRAT, R4_ANXA10_647]
-  # exclude_channels: []
+  # This final assembly stage is intended for a modern Harpy + SpatialData env
+  # after merge / InstanSeg / optional Nimbus artifacts already exist.
 
 slides:
   SLIDE-0329_crop_2048:
     slide_dir: /mnt/c/analysis/Data_prototype/SLIDE-0329_crop_2048
-    output_dir: /mnt/c/analysis/Data_prototype/SLIDE-0329_crop_2048/outputs
+    output_dir: /mnt/c/analysis/Data_prototype/SLIDE-0329_crop_2048/pipeline_outputs
     channel_map_file: channel_map.generated.json
 
   SLIDE-0329_crop_2048_2:
     slide_dir: /mnt/c/analysis/Data_prototype/SLIDE-0329_crop_2048_2
-    output_dir: /mnt/c/analysis/Data_prototype/SLIDE-0329_crop_2048_2/outputs
+    output_dir: /mnt/c/analysis/Data_prototype/SLIDE-0329_crop_2048_2/pipeline_outputs
     channel_map_file: channel_map.generated.json

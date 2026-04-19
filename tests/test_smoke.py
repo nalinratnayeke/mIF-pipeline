@@ -18,7 +18,6 @@ from mif_pipeline.config import (
     resolve_nimbus_channel_entries,
     resolve_nimbus_inputs,
     resolve_nimbus_multislide_inputs,
-    resolve_spatialdata_channel_entries,
 )
 from mif_pipeline.merge_ometiff import (
     _downsample2x_mean,
@@ -77,14 +76,6 @@ def write_config(tmp_path: Path) -> Path:
                     "channel_patterns": ["*.tif"],
                     "channel_map_output": "channel_map.generated.json",
                 },
-                "seg_merge": {
-                    "enabled": True,
-                    "channels": ["R0_DAPI", "R0_PANCK"],
-                    "suffix": "_seg.ome.tif",
-                    "compression": "zlib",
-                    "tile": [256, 256],
-                    "bigtiff": True,
-                },
                 "full_merge": {
                     "enabled": True,
                     "channels": ["R0_DAPI", "R0_PANCK"],
@@ -94,6 +85,7 @@ def write_config(tmp_path: Path) -> Path:
                     "bigtiff": True,
                 },
                 "instanseg": {
+                    "channels": ["R0_DAPI", "R0_PANCK"],
                     "model": "fluorescence_nuclei_and_cells",
                     "prediction_tag": "_instanseg_prediction",
                     "tile_size": 2048,
@@ -132,7 +124,10 @@ def write_config(tmp_path: Path) -> Path:
                 "spatialdata": {
                     "enabled": True,
                     "suffix": "_spatialdata.sdata.zarr",
-                    "exclude_channels": [],
+                    "aggregate": True,
+                    "run_on_gpu": False,
+                    "derive_shapes": False,
+                    "load_nimbus": True,
                 },
             }
         },
@@ -214,14 +209,6 @@ def write_multislide_config(tmp_path: Path, *, mismatch: bool = False) -> Path:
             "channel_patterns": ["*.tif"],
             "channel_map_output": "channel_map.generated.json",
         },
-        "seg_merge": {
-            "enabled": True,
-            "channels": ["R0_DAPI", "R0_PANCK"],
-            "suffix": "_seg.ome.tif",
-            "compression": "zlib",
-            "tile": [256, 256],
-            "bigtiff": True,
-        },
         "full_merge": {
             "enabled": True,
             "channels": ["R0_DAPI", "R0_PANCK"],
@@ -231,6 +218,7 @@ def write_multislide_config(tmp_path: Path, *, mismatch: bool = False) -> Path:
             "bigtiff": True,
         },
         "instanseg": {
+            "channels": ["R0_DAPI", "R0_PANCK"],
             "model": "fluorescence_nuclei_and_cells",
             "prediction_tag": "_instanseg_prediction",
             "tile_size": 2048,
@@ -269,7 +257,9 @@ def write_multislide_config(tmp_path: Path, *, mismatch: bool = False) -> Path:
         "spatialdata": {
             "enabled": True,
             "suffix": "_spatialdata.sdata.zarr",
-            "exclude_channels": [],
+            "aggregate": True,
+            "derive_shapes": False,
+            "load_nimbus": True,
         },
         "slides": {
             "SLIDE-A": {
@@ -305,8 +295,12 @@ def test_run_instanseg_writes_full_resolution_masks_in_medium_mode(tmp_path: Pat
     config_path = write_config(tmp_path)
     config = load_config(config_path)
     slide = get_slide_config(config, "SLIDE-0272")
-    ome_path = Path(slide["seg_merge"]["ome_path"])
-    tf.imwrite(ome_path, np.zeros((8, 8), dtype=np.uint16))
+    ome_path = Path(slide["full_merge"]["ome_path"])
+    tf.imwrite(
+        ome_path,
+        np.zeros((2, 8, 8), dtype=np.uint16),
+        metadata={"axes": "CYX", "PhysicalSizeX": 0.5, "PhysicalSizeY": 0.5},
+    )
 
     calls: list[tuple[str, object]] = []
 
@@ -329,13 +323,9 @@ def test_run_instanseg_writes_full_resolution_masks_in_medium_mode(tmp_path: Pat
             self.verbosity = verbosity
             self.prediction_tag = "_instanseg_prediction"
 
-        def read_image(self, image: str):
-            calls.append(("read_image", image))
-            return np.zeros((2, 4, 4), dtype=np.float32), 0.5
-
         def eval_medium_image(self, image_array, **kwargs):
-            calls.append(("medium", kwargs))
-            assert image_array.shape == (2, 4, 4)
+            calls.append(("medium", image_array.shape, kwargs))
+            assert image_array.shape == (2, 8, 8)
             return DummyTensor(np.arange(2 * 4 * 4, dtype=np.int32).reshape(1, 2, 4, 4))
 
     monkeypatch.setattr(instanseg_runner_module, "_import_instanseg", lambda: DummyInstanSeg)
@@ -356,21 +346,27 @@ def test_run_instanseg_writes_full_resolution_masks_in_medium_mode(tmp_path: Pat
     assert cell_mask.dtype == np.uint32
     assert nuclear_mask.dtype == np.uint32
 
-    assert calls[0] == ("read_image", str(ome_path))
-    assert calls[1][0] == "medium"
-    assert calls[1][1]["pixel_size"] == 0.325
-    assert calls[1][1]["tile_size"] == 2048
-    assert calls[1][1]["batch_size"] == 1
-    assert calls[1][1]["return_image_tensor"] is False
-    assert calls[1][1]["resolve_cell_and_nucleus"] is True
+    assert result["channels"] == ["R0_DAPI", "R0_PANCK"]
+    assert result["channel_indices"] == [0, 1]
+    assert calls[0][0] == "medium"
+    assert calls[0][1] == (2, 8, 8)
+    assert calls[0][2]["pixel_size"] == 0.325
+    assert calls[0][2]["tile_size"] == 2048
+    assert calls[0][2]["batch_size"] == 1
+    assert calls[0][2]["return_image_tensor"] is False
+    assert calls[0][2]["resolve_cell_and_nucleus"] is True
 
 
 def test_run_instanseg_skips_when_masks_already_exist(tmp_path: Path):
     config_path = write_config(tmp_path)
     config = load_config(config_path)
     slide = get_slide_config(config, "SLIDE-0272")
-    ome_path = Path(slide["seg_merge"]["ome_path"])
-    tf.imwrite(ome_path, np.zeros((8, 8), dtype=np.uint16))
+    ome_path = Path(slide["full_merge"]["ome_path"])
+    tf.imwrite(
+        ome_path,
+        np.zeros((2, 8, 8), dtype=np.uint16),
+        metadata={"axes": "CYX", "PhysicalSizeX": 0.5, "PhysicalSizeY": 0.5},
+    )
 
     mask_dir = Path(slide["mask_export"]["mask_dir"])
     mask_dir.mkdir(parents=True, exist_ok=True)
@@ -409,6 +405,32 @@ def test_load_config_rejects_slides_root(tmp_path: Path):
         raise AssertionError("Expected configs with slides_root to raise ValueError.")
 
 
+def test_load_config_rejects_legacy_seg_merge(tmp_path: Path):
+    config_path = tmp_path / "legacy.yaml"
+    config_path.write_text(
+        yaml.safe_dump(
+            {
+                "seg_merge": {"enabled": True},
+                "slides": {
+                    "SLIDE-1": {
+                        "slide_dir": str(tmp_path / "input"),
+                        "output_dir": str(tmp_path / "output"),
+                        "channel_map_file": "channel_map.json",
+                    }
+                },
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    try:
+        load_config(config_path)
+    except ValueError as exc:
+        assert "Legacy 'seg_merge' config is no longer supported" in str(exc)
+    else:
+        raise AssertionError("Expected legacy seg_merge configs to raise ValueError.")
+
+
 def test_get_slide_config_merges_shared_defaults(tmp_path: Path):
     config_path = write_multislide_config(tmp_path)
     config = load_config(config_path)
@@ -418,7 +440,8 @@ def test_get_slide_config_merges_shared_defaults(tmp_path: Path):
 
     assert slide_a["pixel_size_um"] == 0.325
     assert slide_a["slide_dir"] == str(tmp_path / "image_data" / "SLIDE-A")
-    assert slide_a["seg_merge"]["ome_path"] == str(tmp_path / "work" / "SLIDE-A" / "SLIDE-A_seg.ome.tif")
+    assert slide_a["full_merge"]["ome_path"] == str(tmp_path / "work" / "SLIDE-A" / "SLIDE-A_full.ome.tif")
+    assert slide_a["instanseg"]["channels"] == ["R0_DAPI", "R0_PANCK"]
     assert slide_a["channel_map_file"] == str(tmp_path / "work" / "SLIDE-A" / "channel_map.generated.json")
     assert slide_b["nimbus"]["channel_chunk_size"] == 2
     assert slide_a["nimbus"]["channel_chunk_size"] == 1
@@ -440,7 +463,7 @@ def test_get_slide_config_requires_output_dir(tmp_path: Path):
 def test_get_slide_config_rejects_both_merge_suffix_and_legacy_ome_path(tmp_path: Path):
     config_path = write_config(tmp_path)
     config = load_config(config_path)
-    config["slides"]["SLIDE-0272"]["seg_merge"]["ome_path"] = "legacy.ome.tif"
+    config["slides"]["SLIDE-0272"]["full_merge"]["ome_path"] = "legacy.ome.tif"
 
     try:
         get_slide_config(config, "SLIDE-0272")
@@ -751,6 +774,10 @@ def test_resolve_nimbus_multislide_inputs_requires_unique_fov_basenames(tmp_path
 def test_setup_slides_generates_all_matching_channel_maps(tmp_path: Path):
     config_path = write_multislide_config(tmp_path)
     config = load_config(config_path)
+    for slide_id in ("SLIDE-A", "SLIDE-B"):
+        output_path = tmp_path / "work" / slide_id / "channel_map.generated.json"
+        if output_path.exists():
+            output_path.unlink()
 
     result = setup_slides(config)
 
@@ -766,6 +793,10 @@ def test_setup_slides_generates_all_matching_channel_maps(tmp_path: Path):
 def test_setup_slides_dry_run_validates_without_writing(tmp_path: Path):
     config_path = write_multislide_config(tmp_path)
     config = load_config(config_path)
+    for slide_id in ("SLIDE-A", "SLIDE-B"):
+        output_path = tmp_path / "work" / slide_id / "channel_map.generated.json"
+        if output_path.exists():
+            output_path.unlink()
 
     result = setup_slides(config, dry_run=True)
 
@@ -777,6 +808,10 @@ def test_setup_slides_dry_run_validates_without_writing(tmp_path: Path):
 def test_setup_slides_fails_atomically_on_channel_mismatch(tmp_path: Path):
     config_path = write_multislide_config(tmp_path, mismatch=True)
     config = load_config(config_path)
+    for slide_id in ("SLIDE-A", "SLIDE-B"):
+        output_path = tmp_path / "work" / slide_id / "channel_map.generated.json"
+        if output_path.exists():
+            output_path.unlink()
 
     try:
         setup_slides(config)
@@ -796,7 +831,8 @@ def test_dry_run_pipeline(tmp_path: Path):
 
     result = run_all(config, "SLIDE-0272", dry_run=True)
 
-    assert result["merge"]["outputs"]["seg_merge"]["status"] == "planned"
+    assert set(result["merge"]["outputs"]) == {"full_merge"}
+    assert result["merge"]["outputs"]["full_merge"]["status"] == "planned"
     assert result["instanseg"]["status"] == "planned"
     assert result["nimbus"]["status"] == "planned"
 
@@ -839,6 +875,17 @@ def test_nimbus_chunk_dry_run(tmp_path: Path):
     assert result["chunks"][0]["chunk_index"] == 1
     assert result["chunks"][0]["nimbus_channels"] == ["R0_PANCK"]
     assert result["fov_paths"] == [str(tmp_path / "images" / "SLIDE-0272")]
+
+
+def test_nimbus_chunk_dry_run_uses_slide_output_dir_when_multislide_disabled(tmp_path: Path):
+    config_path = write_config(tmp_path)
+    config = load_config(config_path)
+    config["slides"]["SLIDE-0272"]["nimbus"]["multislide"]["enabled"] = False
+
+    result = run_nimbus_chunked(config, "SLIDE-0272", dry_run=True)
+
+    assert result["output_dir"] == str(tmp_path / "work" / "SLIDE-0272" / "nimbus")
+    assert result["per_slide_output_dir"] == str(tmp_path / "work" / "SLIDE-0272" / "nimbus" / "per_slide")
 
 
 def test_nimbus_multislide_dry_run(tmp_path: Path):
@@ -1164,15 +1211,14 @@ def test_spatialdata_prefers_multislide_per_slide_nimbus_table_path(tmp_path: Pa
 def test_spatialdata_dry_run_uses_all_channels_by_default(tmp_path: Path):
     config_path = write_config(tmp_path)
     config = load_config(config_path)
-    config["slides"]["SLIDE-0272"]["spatialdata"].pop("exclude_channels")
 
     result = build_spatialdata(config, "SLIDE-0272", dry_run=True)
 
     assert result["status"] == "planned"
-    assert result["aggregation_aliases"] == ["R0_DAPI", "R0_PANCK"]
-    assert result["planned_tables"] == ["nimbus_table", "agg_cell_labels"]
-    assert result["aggregate_raster"] is True
-    assert result["aggregate_vector"] is False
+    assert result["image_aliases"] == ["R0_DAPI", "R0_PANCK"]
+    assert result["planned_tables"] == ["agg_cell_labels", "agg_nuclear_labels", "nimbus_table"]
+    assert result["aggregate"] is True
+    assert result["derive_shapes"] is False
     assert result["load_nimbus"] is True
 
 
@@ -1183,57 +1229,200 @@ def test_spatialdata_dry_run_can_skip_nimbus_table(tmp_path: Path):
 
     result = build_spatialdata(config, "SLIDE-0272", dry_run=True)
 
-    assert result["planned_tables"] == ["agg_cell_labels"]
+    assert result["planned_tables"] == ["agg_cell_labels", "agg_nuclear_labels"]
     assert result["load_nimbus"] is False
 
 
-def test_spatialdata_dry_run_can_plan_vector_tables(tmp_path: Path):
+def test_spatialdata_dry_run_can_plan_derived_shapes(tmp_path: Path):
     config_path = write_config(tmp_path)
     config = load_config(config_path)
-    config["slides"]["SLIDE-0272"]["spatialdata"]["aggregate_vector"] = True
+    config["slides"]["SLIDE-0272"]["spatialdata"]["derive_shapes"] = True
 
     result = build_spatialdata(config, "SLIDE-0272", dry_run=True)
 
-    assert result["planned_tables"] == [
-        "nimbus_table",
-        "agg_cell_labels",
-        "agg_cell_boundaries",
-    ]
-    assert result["aggregate_raster"] is True
-    assert result["aggregate_vector"] is True
+    assert result["planned_shapes"] == ["cell_boundaries", "nuclear_boundaries"]
+    assert result["derive_shapes"] is True
 
 
-def test_spatialdata_can_exclude_channels(tmp_path: Path):
-    config_path = write_config(tmp_path)
-    config = load_config(config_path)
-    config["slides"]["SLIDE-0272"]["spatialdata"]["exclude_channels"] = ["R0_PANCK"]
-
-    entries = resolve_spatialdata_channel_entries(config, "SLIDE-0272")
-
-    assert [entry["alias"] for entry in entries] == ["R0_DAPI"]
-
-
-def test_spatialdata_channels_and_exclude_channels_are_mutually_exclusive(tmp_path: Path):
-    config_path = write_config(tmp_path)
-    config = load_config(config_path)
-    config["slides"]["SLIDE-0272"]["spatialdata"]["channels"] = ["R0_DAPI"]
-
-    try:
-        resolve_spatialdata_channel_entries(config, "SLIDE-0272")
-    except ValueError as exc:
-        assert "only one of 'channels' or 'exclude_channels'" in str(exc)
-    else:
-        raise AssertionError("Expected mutually exclusive SpatialData channel settings to raise ValueError.")
-
-
-def test_dry_run_pipeline_includes_spatialdata(tmp_path: Path):
+def test_dry_run_pipeline_stops_before_spatialdata(tmp_path: Path):
     config_path = write_config(tmp_path)
     config = load_config(config_path)
 
     result = run_all(config, "SLIDE-0272", dry_run=True)
 
-    assert result["spatialdata"]["status"] == "planned"
-    assert result["spatialdata"]["store_path"].endswith("_spatialdata.sdata.zarr")
+    assert "spatialdata" not in result
+
+
+def _install_spatialdata_assembly_stubs(monkeypatch):
+    import pandas as pd
+
+    class DummyTransform:
+        def __init__(self, sx=1.0, sy=1.0):
+            self.sx = sx
+            self.sy = sy
+
+    class DummyScale(DummyTransform):
+        def __init__(self, values, axes=None):
+            super().__init__(float(values[0]), float(values[1]))
+            self.axes = axes
+
+    class DummyCoord:
+        def __init__(self, values):
+            self.values = np.array(values, dtype=object)
+
+    class DummyImageArray:
+        def __init__(self, channels):
+            self.shape = (len(channels), 2, 2)
+            self.dims = ("c", "y", "x")
+            self.coords = {"c": DummyCoord(channels)}
+            self.data = types.SimpleNamespace(chunks=((1,) * len(channels), (2,), (2,)))
+            self._transform = DummyTransform(1.0, 1.0)
+
+    class DummyImageTree:
+        def __init__(self, channels):
+            self.scale0 = {"image": DummyImageArray(channels)}
+            self._transform = DummyTransform(1.0, 1.0)
+
+        def __getitem__(self, key):
+            if key == "scale0":
+                return self.scale0
+            raise KeyError(key)
+
+    class DummyElement:
+        def __init__(self, kind, payload):
+            self.kind = kind
+            self.payload = payload
+            self._transform = DummyTransform(1.0, 1.0)
+
+        def copy(self):
+            payload = self.payload.copy() if hasattr(self.payload, "copy") else self.payload
+            return DummyElement(self.kind, payload)
+
+    class DummyTable:
+        def __init__(self, obs, var_names):
+            self.obs = obs.copy()
+            self.var_names = pd.Index(var_names)
+            self.n_obs = len(self.obs.index)
+            self.n_vars = len(self.var_names)
+            self._transform = DummyTransform(1.0, 1.0)
+
+        def copy(self):
+            return DummyTable(self.obs.copy(), self.var_names.tolist())
+
+    class DummySpatialData:
+        def __init__(self, images=None, labels=None, shapes=None, tables=None):
+            self.images = images or {}
+            self.labels = labels or {}
+            self.shapes = shapes or {}
+            self.tables = tables or {}
+
+        def __setitem__(self, key, value):
+            if getattr(value, "kind", None) == "shapes":
+                self.shapes[key] = value
+            elif getattr(value, "kind", None) == "labels":
+                self.labels[key] = value
+            elif hasattr(value, "obs") and hasattr(value, "var_names"):
+                self.tables[key] = value
+            else:
+                self.images[key] = value
+
+        def write(self, path, overwrite=False):
+            path.mkdir(parents=True, exist_ok=True)
+            (path / "zarr.json").write_text("{}", encoding="utf-8")
+
+    class DummyLabels2DModel:
+        @staticmethod
+        def parse(array, dims=None):
+            return DummyElement("labels", np.asarray(array))
+
+    class DummyShapesModel:
+        @staticmethod
+        def parse(frame):
+            return DummyElement("shapes", frame.copy())
+
+    class DummyTableModel:
+        @staticmethod
+        def parse(table, region=None, region_key=None, instance_key=None, overwrite_metadata=False):
+            if hasattr(table, "var"):
+                return DummyTable(table.obs.copy(), list(table.var.index))
+            return table
+
+    class DummyAnnData:
+        def __init__(self, X, obs, var):
+            self.X = X
+            self.obs = obs
+            self.var = var
+
+    class DummySpatialdataModule:
+        @staticmethod
+        def to_polygons(label_element):
+            labels = sorted(int(value) for value in np.unique(label_element.payload) if value > 0)
+            return pd.DataFrame({"label": labels, "geometry": [f"geom_{label}" for label in labels]})
+
+    class DummyHarpy:
+        class tb:
+            @staticmethod
+            def allocate_intensity(
+                sdata,
+                img_layer,
+                labels_layer,
+                output_layer,
+                mode,
+                obs_stats,
+                instance_size_key,
+                chunks,
+                append,
+                calculate_center_of_mass,
+                run_on_gpu,
+                overwrite,
+            ):
+                label_payload = sdata.labels[labels_layer].payload
+                labels = sorted(int(value) for value in np.unique(label_payload) if value > 0)
+                obs = pd.DataFrame({"instance_id": [str(label) for label in labels]})
+                obs.index = obs["instance_id"]
+                sdata.tables[output_layer] = DummyTable(obs, ["channel_R0_DAPI", "channel_R0_PANCK"])
+                return sdata
+
+    monkeypatch.setattr(
+        spatialdata_builder_module,
+        "_load_full_image_from_tiffslide",
+        lambda *args, **kwargs: (
+            DummyImageTree(["R0_DAPI", "R0_PANCK"]),
+            (2, 2),
+            {
+                "loader": "tiffslide_zarr",
+                "level_keys": ["0"],
+                "level_details": [
+                    {
+                        "key": "0",
+                        "dims": ("c", "y", "x"),
+                        "shape": (2, 2, 2),
+                        "chunks": ((1, 1), (2,), (2,)),
+                    }
+                ],
+                "channel_count": 2,
+                "tile_size": [256, 256],
+            },
+            types.SimpleNamespace(close=lambda: None),
+        ),
+    )
+    monkeypatch.setattr(
+        spatialdata_builder_module,
+        "_import_spatialdata",
+        lambda: (
+            DummySpatialdataModule,
+            DummySpatialData,
+            DummyLabels2DModel,
+            DummyShapesModel,
+            DummyTableModel,
+            lambda: DummyTransform(1.0, 1.0),
+            DummyScale,
+            lambda element, transform, **kwargs: setattr(element, "_transform", transform),
+        ),
+    )
+    monkeypatch.setattr(spatialdata_builder_module, "_import_harpy", lambda: DummyHarpy)
+    monkeypatch.setattr(spatialdata_builder_module, "_import_anndata", lambda: types.SimpleNamespace(AnnData=DummyAnnData))
+    monkeypatch.setattr(spatialdata_builder_module, "_import_tifffile", lambda: tf)
 
 
 def test_build_spatialdata_import_guard(monkeypatch, tmp_path: Path):
@@ -1244,21 +1433,33 @@ def test_build_spatialdata_import_guard(monkeypatch, tmp_path: Path):
     paths["full_merge_path"].write_bytes(b"fake")
     paths["cell_mask_path"].parent.mkdir(parents=True, exist_ok=True)
     tf.imwrite(paths["cell_mask_path"], np.ones((4, 4), dtype=np.uint32))
-    paths["nimbus_table_path"].parent.mkdir(parents=True, exist_ok=True)
-    paths["nimbus_table_path"].write_text("cell_id,fov,marker_a\n1,SLIDE-0272,0.5\n", encoding="utf-8")
 
     monkeypatch.setattr(
         spatialdata_builder_module,
-        "_import_sopa",
-        lambda: (_ for _ in ()).throw(ImportError("SpatialData build requires 'sopa' in the active environment.")),
+        "_import_spatialdata",
+        lambda: (
+            types.SimpleNamespace(),
+            object,
+            object,
+            object,
+            object,
+            lambda: None,
+            object,
+            lambda *args, **kwargs: None,
+        ),
+    )
+    monkeypatch.setattr(
+        spatialdata_builder_module,
+        "_import_harpy",
+        lambda: (_ for _ in ()).throw(ImportError("SpatialData assembly requires 'harpy' in the active environment.")),
     )
 
     try:
         build_spatialdata(config, "SLIDE-0272", dry_run=False)
     except ImportError as exc:
-        assert "requires 'sopa'" in str(exc)
+        assert "requires 'harpy'" in str(exc)
     else:
-        raise AssertionError("Expected missing sopa import to raise ImportError.")
+        raise AssertionError("Expected missing harpy import to raise ImportError.")
 
 
 def test_build_spatialdata_execution_with_stubs(monkeypatch, tmp_path: Path):
@@ -1266,6 +1467,7 @@ def test_build_spatialdata_execution_with_stubs(monkeypatch, tmp_path: Path):
 
     config_path = write_config(tmp_path)
     config = load_config(config_path)
+    config["slides"]["SLIDE-0272"]["spatialdata"]["derive_shapes"] = True
     slide = get_slide_config(config, "SLIDE-0272")
     paths = spatialdata_builder_module._spatialdata_paths(slide)
 
@@ -1284,177 +1486,14 @@ def test_build_spatialdata_execution_with_stubs(monkeypatch, tmp_path: Path):
         }
     ).to_csv(paths["nimbus_table_path"], index=False)
 
-    class DummyTransform:
-        def __init__(self, sx=1.0, sy=1.0):
-            self.sx = sx
-            self.sy = sy
-
-        def to_affine_matrix(self, input_axes=None, output_axes=None):
-            return np.array(
-                [[self.sx, 0.0, 0.0], [0.0, self.sy, 0.0], [0.0, 0.0, 1.0]],
-                dtype=float,
-            )
-
-    class DummyScale(DummyTransform):
-        def __init__(self, values, axes=None):
-            super().__init__(float(values[0]), float(values[1]))
-            self.axes = axes
-
-    class DummyCoord:
-        def __init__(self, values):
-            self.values = np.array(values, dtype=object)
-
-    class DummyImageArray:
-        def __init__(self, channels):
-            self.shape = (len(channels), 2, 2)
-            self.dims = ("c", "y", "x")
-            self.coords = {"c": DummyCoord(channels)}
-            self._transform = DummyTransform(1.0, 1.0)
-
-    class DummyImage:
-        def __init__(self, channels):
-            self.scale0 = {"image": DummyImageArray(channels)}
-            self._transform = DummyTransform(1.0, 1.0)
-
-        def __getitem__(self, key):
-            if key == "scale0":
-                return self.scale0
-            raise KeyError(key)
-
-    class DummyElement:
-        def __init__(self, kind, payload):
-            self.kind = kind
-            self.payload = payload
-            self._transform = DummyTransform(1.0, 1.0)
-
-        def copy(self):
-            payload = self.payload.copy() if hasattr(self.payload, "copy") else self.payload
-            return DummyElement(self.kind, payload)
-
-    class DummyTable:
-        def __init__(self, obs, var_names):
-            self.obs = obs.copy()
-            self.var_names = pd.Index(var_names)
-            self.n_obs = len(obs.index)
-            self.n_vars = len(var_names)
-            self._transform = DummyTransform(1.0, 1.0)
-
-        def __getitem__(self, key):
-            rows, columns = key
-            if rows != slice(None):
-                raise AssertionError("DummyTable only supports full-row slicing.")
-            return DummyTable(self.obs.copy(), [str(column) for column in columns])
-
-        def copy(self):
-            return DummyTable(self.obs.copy(), self.var_names.tolist())
-
-    class DummySpatialData:
-        def __init__(self, images=None, labels=None, shapes=None, tables=None):
-            self.images = images or {}
-            self.labels = labels or {}
-            self.shapes = shapes or {}
-            self.tables = tables or {}
-
-        def __setitem__(self, key, value):
-            if getattr(value, "kind", None) == "shapes":
-                self.shapes[key] = value
-            elif hasattr(value, "obs") and hasattr(value, "var_names"):
-                self.tables[key] = value
-            elif getattr(value, "kind", None) == "labels":
-                self.labels[key] = value
-            else:
-                self.images[key] = value
-
-        def write(self, path, overwrite=False):
-            path.mkdir(parents=True, exist_ok=True)
-            (path / "zarr.json").write_text("{}", encoding="utf-8")
-
-    class DummyLabels2DModel:
-        @staticmethod
-        def parse(array, dims=None):
-            return DummyElement("labels", np.asarray(array))
-
-    class DummyShapesModel:
-        @staticmethod
-        def parse(frame):
-            return DummyElement("shapes", frame.copy())
-
-    class DummyTableModel:
-        @staticmethod
-        def parse(table, region=None, region_key=None, instance_key=None, overwrite_metadata=False):
-            return DummyTable(table.obs.copy(), list(table.var.index))
-
-    class DummyAnnData:
-        def __init__(self, X, obs, var):
-            self.X = X
-            self.obs = obs
-            self.var = var
-
-    class DummySopaModule:
-        aggregate_calls = []
-
-        class io:
-            @staticmethod
-            def ome_tif(path):
-                return types.SimpleNamespace(images={"fake_full_merge": DummyImage(["R0_DAPI", "R0_PANCK"])})
-
-        @staticmethod
-        def aggregate(
-            sdata,
-            aggregate_genes=False,
-            aggregate_channels=True,
-            image_key=None,
-            shapes_key=None,
-            key_added=None,
-            min_intensity_ratio=0.0,
-        ):
-            DummySopaModule.aggregate_calls.append(shapes_key)
-            shape_element = sdata.shapes[shapes_key]
-            shape_frame = shape_element.payload if hasattr(shape_element, "payload") else shape_element
-            obs = shape_frame[["instance_id"]].copy()
-            obs.index = ["sopa_0", "sopa_1"][: len(obs.index)]
-            obs["region"] = shapes_key
-            sdata.tables[key_added] = DummyTable(obs, ["channel_R0_DAPI_mean", "channel_R0_PANCK_mean"])
-
-    class DummySpatialdataModule:
-        aggregate_calls = []
-
-        @staticmethod
-        def to_polygons(label_element):
-            labels = sorted(int(value) for value in np.unique(label_element.payload) if value > 0)
-            return pd.DataFrame({"label": labels, "geometry": [f"geom_{label}" for label in labels]})
-
-        @staticmethod
-        def aggregate(values, by, values_sdata, by_sdata, agg_func, table_name):
-            DummySpatialdataModule.aggregate_calls.append(by)
-            label_element = by_sdata.labels[by]
-            labels = sorted(int(value) for value in np.unique(label_element.payload) if value > 0)
-            obs = pd.DataFrame({"instance_id": [str(label) for label in labels]})
-            return DummySpatialData(tables={table_name: DummyTable(obs, ["channel_R0_DAPI", "channel_R0_PANCK"])})
-
-    monkeypatch.setattr(spatialdata_builder_module, "_import_sopa", lambda: DummySopaModule)
-    monkeypatch.setattr(
-        spatialdata_builder_module,
-        "_import_spatialdata",
-        lambda: (
-            DummySpatialdataModule,
-            DummySpatialData,
-            DummyLabels2DModel,
-            DummyShapesModel,
-            DummyTableModel,
-            DummyScale,
-            lambda element, transform, to_coordinate_system="global": setattr(element, "_transform", transform),
-        ),
-    )
-    monkeypatch.setattr(spatialdata_builder_module, "_import_anndata", lambda: types.SimpleNamespace(AnnData=DummyAnnData))
-    monkeypatch.setattr(spatialdata_builder_module, "_import_tifffile", lambda: tf)
+    _install_spatialdata_assembly_stubs(monkeypatch)
     result = build_spatialdata(config, "SLIDE-0272", dry_run=False, return_sdata=True)
 
     assert result["status"] == "written"
+    assert result["image_loader"] == "tiffslide_zarr"
     assert result["labels"] == ["cell_labels", "nuclear_labels"]
     assert result["shapes"] == ["cell_boundaries", "nuclear_boundaries"]
     assert result["tables"] == ["agg_cell_labels", "agg_nuclear_labels", "nimbus_table"]
-    assert DummySpatialdataModule.aggregate_calls == ["cell_labels", "nuclear_labels"]
     assert result["aggregate_tables"][0]["features"] == ["R0_DAPI", "R0_PANCK"]
     assert result["aggregate_tables"][1]["features"] == ["R0_DAPI", "R0_PANCK"]
     assert result["sdata"].tables["nimbus_table"].var_names.tolist() == ["R0_DAPI", "R0_PANCK"]
@@ -1462,16 +1501,15 @@ def test_build_spatialdata_execution_with_stubs(monkeypatch, tmp_path: Path):
         "full_image": 0.325,
         "cell_labels": 0.325,
         "nuclear_labels": 0.325,
+        "cell_boundaries": 0.325,
+        "nuclear_boundaries": 0.325,
     }
     assert Path(result["store_path"]).exists()
 
 
-def test_build_spatialdata_execution_can_skip_nimbus_table(monkeypatch, tmp_path: Path):
-    import pandas as pd
-
+def test_build_spatialdata_execution_can_skip_missing_nimbus(monkeypatch, tmp_path: Path):
     config_path = write_config(tmp_path)
     config = load_config(config_path)
-    config["slides"]["SLIDE-0272"]["spatialdata"]["load_nimbus"] = False
     slide = get_slide_config(config, "SLIDE-0272")
     paths = spatialdata_builder_module._spatialdata_paths(slide)
 
@@ -1480,355 +1518,15 @@ def test_build_spatialdata_execution_can_skip_nimbus_table(monkeypatch, tmp_path
     tf.imwrite(paths["cell_mask_path"], np.array([[0, 1], [2, 2]], dtype=np.uint32))
     tf.imwrite(paths["nuclear_mask_path"], np.array([[0, 1], [0, 2]], dtype=np.uint32))
 
-    class DummyTransform:
-        def __init__(self, sx=1.0, sy=1.0):
-            self.sx = sx
-            self.sy = sy
-
-        def to_affine_matrix(self, input_axes=None, output_axes=None):
-            return np.array(
-                [[self.sx, 0.0, 0.0], [0.0, self.sy, 0.0], [0.0, 0.0, 1.0]],
-                dtype=float,
-            )
-
-    class DummyScale(DummyTransform):
-        def __init__(self, values, axes=None):
-            super().__init__(float(values[0]), float(values[1]))
-            self.axes = axes
-
-    class DummyCoord:
-        def __init__(self, values):
-            self.values = np.array(values, dtype=object)
-
-    class DummyImageArray:
-        def __init__(self, channels):
-            self.shape = (len(channels), 2, 2)
-            self.dims = ("c", "y", "x")
-            self.coords = {"c": DummyCoord(channels)}
-            self._transform = DummyTransform(1.0, 1.0)
-
-    class DummyImage:
-        def __init__(self, channels):
-            self.scale0 = {"image": DummyImageArray(channels)}
-            self._transform = DummyTransform(1.0, 1.0)
-
-        def __getitem__(self, key):
-            if key == "scale0":
-                return self.scale0
-            raise KeyError(key)
-
-    class DummyElement:
-        def __init__(self, kind, payload):
-            self.kind = kind
-            self.payload = payload
-            self._transform = DummyTransform(1.0, 1.0)
-
-        def copy(self):
-            payload = self.payload.copy() if hasattr(self.payload, "copy") else self.payload
-            return DummyElement(self.kind, payload)
-
-    class DummyTable:
-        def __init__(self, obs, var_names):
-            self.obs = obs.copy()
-            self.var_names = pd.Index(var_names)
-            self.n_obs = len(obs.index)
-            self.n_vars = len(var_names)
-            self._transform = DummyTransform(1.0, 1.0)
-
-        def __getitem__(self, key):
-            rows, columns = key
-            if rows != slice(None):
-                raise AssertionError("DummyTable only supports full-row slicing.")
-            return DummyTable(self.obs.copy(), [str(column) for column in columns])
-
-        def copy(self):
-            return DummyTable(self.obs.copy(), self.var_names.tolist())
-
-    class DummySpatialData:
-        def __init__(self, images=None, labels=None, shapes=None, tables=None):
-            self.images = images or {}
-            self.labels = labels or {}
-            self.shapes = shapes or {}
-            self.tables = tables or {}
-
-        def __setitem__(self, key, value):
-            if getattr(value, "kind", None) == "shapes":
-                self.shapes[key] = value
-            elif hasattr(value, "obs") and hasattr(value, "var_names"):
-                self.tables[key] = value
-            elif getattr(value, "kind", None) == "labels":
-                self.labels[key] = value
-            else:
-                self.images[key] = value
-
-        def write(self, path, overwrite=False):
-            path.mkdir(parents=True, exist_ok=True)
-            (path / "zarr.json").write_text("{}", encoding="utf-8")
-
-    class DummyLabels2DModel:
-        @staticmethod
-        def parse(array, dims=None):
-            return DummyElement("labels", np.asarray(array))
-
-    class DummyShapesModel:
-        @staticmethod
-        def parse(frame):
-            return DummyElement("shapes", frame.copy())
-
-    class DummyTableModel:
-        @staticmethod
-        def parse(table, region=None, region_key=None, instance_key=None, overwrite_metadata=False):
-            return DummyTable(table.obs.copy(), list(table.var.index))
-
-    class DummySopaModule:
-        class io:
-            @staticmethod
-            def ome_tif(path):
-                return types.SimpleNamespace(images={"fake_full_merge": DummyImage(["R0_DAPI", "R0_PANCK"])})
-
-    class DummySpatialdataModule:
-        aggregate_calls = []
-
-        @staticmethod
-        def to_polygons(label_element):
-            labels = sorted(int(value) for value in np.unique(label_element.payload) if value > 0)
-            return pd.DataFrame({"label": labels, "geometry": [f"geom_{label}" for label in labels]})
-
-        @staticmethod
-        def aggregate(values, by, values_sdata, by_sdata, agg_func, table_name):
-            DummySpatialdataModule.aggregate_calls.append(by)
-            label_element = by_sdata.labels[by]
-            labels = sorted(int(value) for value in np.unique(label_element.payload) if value > 0)
-            obs = pd.DataFrame({"instance_id": [str(label) for label in labels]})
-            return DummySpatialData(tables={table_name: DummyTable(obs, ["channel_R0_DAPI", "channel_R0_PANCK"])})
-
-    monkeypatch.setattr(spatialdata_builder_module, "_import_sopa", lambda: DummySopaModule)
-    monkeypatch.setattr(
-        spatialdata_builder_module,
-        "_import_spatialdata",
-        lambda: (
-            DummySpatialdataModule,
-            DummySpatialData,
-            DummyLabels2DModel,
-            DummyShapesModel,
-            DummyTableModel,
-            DummyScale,
-            lambda element, transform, to_coordinate_system="global": setattr(element, "_transform", transform),
-        ),
-    )
-    monkeypatch.setattr(spatialdata_builder_module, "_import_anndata", lambda: types.SimpleNamespace(AnnData=object))
-    monkeypatch.setattr(spatialdata_builder_module, "_import_tifffile", lambda: tf)
+    _install_spatialdata_assembly_stubs(monkeypatch)
 
     result = build_spatialdata(config, "SLIDE-0272", dry_run=False, return_sdata=True)
 
-    assert result["load_nimbus"] is False
+    assert result["nimbus_loaded"] is False
     assert result["tables"] == ["agg_cell_labels", "agg_nuclear_labels"]
     assert "nimbus_table" not in result["sdata"].tables
 
 
-def test_build_spatialdata_execution_with_vector_aggregation_stubs(monkeypatch, tmp_path: Path):
-    import pandas as pd
-
-    config_path = write_config(tmp_path)
-    config = load_config(config_path)
-    config["slides"]["SLIDE-0272"]["spatialdata"]["aggregate_vector"] = True
-    slide = get_slide_config(config, "SLIDE-0272")
-    paths = spatialdata_builder_module._spatialdata_paths(slide)
-
-    paths["full_merge_path"].write_bytes(b"fake")
-    paths["cell_mask_path"].parent.mkdir(parents=True, exist_ok=True)
-    tf.imwrite(paths["cell_mask_path"], np.array([[0, 1], [2, 2]], dtype=np.uint32))
-    tf.imwrite(paths["nuclear_mask_path"], np.array([[0, 1], [0, 2]], dtype=np.uint32))
-    paths["nimbus_table_path"].parent.mkdir(parents=True, exist_ok=True)
-    pd.DataFrame(
-        {
-            "cell_id": [1, 2],
-            "fov": ["SLIDE-0272", "SLIDE-0272"],
-            "SLIDE-0272_0.0.2_R000_DAPI_F_Tiled": [0.1, 0.2],
-            "SLIDE-0272_0.0.2_R001_PANCK_F_Tiled": [0.3, 0.4],
-        }
-    ).to_csv(paths["nimbus_table_path"], index=False)
-
-    class DummyTransform:
-        def __init__(self, sx=1.0, sy=1.0):
-            self.sx = sx
-            self.sy = sy
-
-    class DummyScale(DummyTransform):
-        def __init__(self, values, axes=None):
-            super().__init__(float(values[0]), float(values[1]))
-            self.axes = axes
-
-    class DummyCoord:
-        def __init__(self, values):
-            self.values = np.array(values, dtype=object)
-
-    class DummyImageArray:
-        def __init__(self, channels):
-            self.shape = (len(channels), 2, 2)
-            self.dims = ("c", "y", "x")
-            self.coords = {"c": DummyCoord(channels)}
-
-    class DummyImage:
-        def __init__(self, channels):
-            self.scale0 = {"image": DummyImageArray(channels)}
-
-        def __getitem__(self, key):
-            if key == "scale0":
-                return self.scale0
-            raise KeyError(key)
-
-    class DummyElement:
-        def __init__(self, kind, payload):
-            self.kind = kind
-            self.payload = payload
-
-        def copy(self):
-            payload = self.payload.copy() if hasattr(self.payload, "copy") else self.payload
-            return DummyElement(self.kind, payload)
-
-    class DummyTable:
-        def __init__(self, obs, var_names):
-            self.obs = obs.copy()
-            self.var_names = pd.Index(var_names)
-            self.n_obs = len(obs.index)
-            self.n_vars = len(var_names)
-
-        def copy(self):
-            return DummyTable(self.obs.copy(), self.var_names.tolist())
-
-        @property
-        def obs_names(self):
-            return self.obs.index
-
-        @obs_names.setter
-        def obs_names(self, values):
-            self.obs.index = list(values)
-
-    class DummySpatialData:
-        def __init__(self, images=None, labels=None, shapes=None, tables=None):
-            self.images = images or {}
-            self.labels = labels or {}
-            self.shapes = shapes or {}
-            self.tables = tables or {}
-
-        def __setitem__(self, key, value):
-            if getattr(value, "kind", None) == "shapes":
-                self.shapes[key] = value
-            elif hasattr(value, "obs") and hasattr(value, "var_names"):
-                self.tables[key] = value
-            elif getattr(value, "kind", None) == "labels":
-                self.labels[key] = value
-            else:
-                self.images[key] = value
-
-        def write(self, path, overwrite=False):
-            path.mkdir(parents=True, exist_ok=True)
-            (path / "zarr.json").write_text("{}", encoding="utf-8")
-
-    class DummyLabels2DModel:
-        @staticmethod
-        def parse(array, dims=None):
-            return DummyElement("labels", np.asarray(array))
-
-    class DummyShapesModel:
-        @staticmethod
-        def parse(frame):
-            return DummyElement("shapes", frame.copy())
-
-    class DummyTableModel:
-        @staticmethod
-        def parse(table, region=None, region_key=None, instance_key=None, overwrite_metadata=False):
-            parsed = DummyTable(table.obs.copy(), list(table.var.index) if hasattr(table, "var") else list(table.var_names))
-            parsed.obs["region"] = region
-            parsed.obs["instance_id"] = parsed.obs[instance_key]
-            return parsed
-
-    class DummyAnnData:
-        def __init__(self, X, obs, var):
-            self.X = X
-            self.obs = obs
-            self.var = var
-
-        def copy(self):
-            return DummyAnnData(self.X, self.obs.copy(), self.var.copy())
-
-    class DummySopaModule:
-        aggregate_calls = []
-
-        class io:
-            @staticmethod
-            def ome_tif(path):
-                return types.SimpleNamespace(images={"fake_full_merge": DummyImage(["R0_DAPI", "R0_PANCK"])})
-
-        @staticmethod
-        def aggregate(
-            sdata,
-            aggregate_genes=False,
-            aggregate_channels=True,
-            image_key=None,
-            shapes_key=None,
-            key_added=None,
-            min_intensity_ratio=0.0,
-        ):
-            DummySopaModule.aggregate_calls.append(shapes_key)
-            shape_frame = sdata.shapes[shapes_key].payload
-            obs = pd.DataFrame(index=[f"sopa_{i}" for i in range(len(shape_frame.index))])
-            obs["region"] = shapes_key
-            sdata.tables[key_added] = DummyTable(obs, ["channel_R0_DAPI_mean", "channel_R0_PANCK_mean"])
-
-    class DummySpatialdataModule:
-        aggregate_calls = []
-
-        @staticmethod
-        def to_polygons(label_element):
-            labels = sorted(int(value) for value in np.unique(label_element.payload) if value > 0)
-            return pd.DataFrame({"label": labels, "geometry": [f"geom_{label}" for label in labels]})
-
-        @staticmethod
-        def aggregate(values, by, values_sdata, by_sdata, agg_func, table_name):
-            DummySpatialdataModule.aggregate_calls.append(by)
-            label_element = by_sdata.labels[by]
-            labels = sorted(int(value) for value in np.unique(label_element.payload) if value > 0)
-            obs = pd.DataFrame({"instance_id": [str(label) for label in labels]})
-            return DummySpatialData(tables={table_name: DummyTable(obs, ["channel_R0_DAPI_mean", "channel_R0_PANCK_mean"])})
-
-    monkeypatch.setattr(spatialdata_builder_module, "_import_sopa", lambda: DummySopaModule)
-    monkeypatch.setattr(
-        spatialdata_builder_module,
-        "_import_spatialdata",
-        lambda: (
-            DummySpatialdataModule,
-            DummySpatialData,
-            DummyLabels2DModel,
-            DummyShapesModel,
-            DummyTableModel,
-            DummyScale,
-            lambda element, transform, to_coordinate_system="global": None,
-        ),
-    )
-    monkeypatch.setattr(spatialdata_builder_module, "_import_anndata", lambda: types.SimpleNamespace(AnnData=DummyAnnData))
-    monkeypatch.setattr(spatialdata_builder_module, "_import_tifffile", lambda: tf)
-
-    result = build_spatialdata(config, "SLIDE-0272", dry_run=False, return_sdata=True)
-
-    assert DummySpatialdataModule.aggregate_calls == ["cell_labels", "nuclear_labels"]
-    assert DummySopaModule.aggregate_calls == ["cell_boundaries", "nuclear_boundaries"]
-    assert result["tables"] == [
-        "agg_cell_labels",
-        "agg_nuclear_labels",
-        "agg_cell_boundaries",
-        "agg_nuclear_boundaries",
-        "nimbus_table",
-    ]
-    assert [entry["mode"] for entry in result["aggregate_tables"]] == ["raster", "raster", "vector", "vector"]
-    assert result["sdata"].tables["agg_cell_boundaries"].obs.index.tolist() == ["1", "2"]
-    assert result["sdata"].tables["agg_cell_boundaries"].obs["instance_id"].tolist() == ["1", "2"]
-    cell_boundary_var_names = result["sdata"].tables["agg_cell_boundaries"].var_names
-    assert (
-        cell_boundary_var_names.tolist() if hasattr(cell_boundary_var_names, "tolist") else list(cell_boundary_var_names)
-    ) == ["R0_DAPI", "R0_PANCK"]
-    assert result["sdata"].tables["agg_nuclear_boundaries"].obs.index.tolist() == ["1", "2"]
 def test_diagnose_label_overlap_instances_reports_mismatched_ids():
     cell_mask = np.array([[0, 4], [5, 5]], dtype=np.uint32)
     nuclear_mask = np.array([[0, 4], [0, 7]], dtype=np.uint32)
