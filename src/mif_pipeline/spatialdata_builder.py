@@ -319,23 +319,27 @@ def _load_full_image_from_tiffslide(
     channel_names: list[str],
 ) -> tuple[Any, tuple[int, int], dict[str, Any], Any]:
     xr, DataTree, Dataset = _import_xarray()
-    tifffile = _import_tifffile()
-    da = _import_dask_array()
+    tiffslide = _import_tiffslide()
 
-    tif = tifffile.TiffFile(full_merge_path)
-    series = tif.series[0]
-    base_shape = tuple(int(value) for value in series.levels[0].shape[-2:])
-    tile_y = int(series.levels[0].pages[0].tilelength or 256)
-    tile_x = int(series.levels[0].pages[0].tilewidth or 256)
-    level_keys = [str(index) for index in range(len(series.levels))]
+    slide = tiffslide.open_slide(str(full_merge_path))
+    zarr_store = slide.zarr_group.store
+    zarr_img = xr.open_zarr(zarr_store, consolidated=False, mask_and_scale=False)
+    level_keys = _level_keys_from_multiscales(zarr_img)
 
     images: dict[str, Any] = {}
     level_details: list[dict[str, Any]] = []
-    for level_index, (level_key, level) in enumerate(zip(level_keys, series.levels, strict=True)):
-        memmap = level.asarray(out="memmap")
-        darr = da.from_array(memmap, chunks=(1, tile_y, tile_x))
-        arr = xr.DataArray(darr, dims=("c", "y", "x"), coords={"c": channel_names})
+    base_shape: tuple[int, int] | None = None
+    tile_y = 256
+    tile_x = 256
+    for level_index, level_key in enumerate(level_keys):
+        arr = zarr_img[level_key]
         normalized = _normalize_level_dims(arr, channel_names=channel_names, level_key=level_key)
+        if base_shape is None:
+            base_shape = tuple(int(value) for value in normalized.shape[-2:])
+            chunks = getattr(normalized.data, "chunks", None)
+            if chunks is not None and len(chunks) >= 3:
+                tile_y = int(chunks[-2][0])
+                tile_x = int(chunks[-1][0])
         level_details.append(
             {
                 "key": level_key,
@@ -348,13 +352,15 @@ def _load_full_image_from_tiffslide(
 
     tree = DataTree.from_dict(images)
     details = {
-        "loader": "tifffile_memmap_pyramid",
+        "loader": "tiffslide_zarr",
         "level_keys": level_keys,
         "level_details": level_details,
         "channel_count": len(channel_names),
         "tile_size": [tile_y, tile_x],
     }
-    return tree, base_shape, details, tif
+    if base_shape is None:
+        raise ValueError(f"No image levels found in {full_merge_path}.")
+    return tree, base_shape, details, slide
 
 
 def _set_global_scale(element: Any, pixel_size_um: float, Scale: Any, set_transformation: Any) -> None:
@@ -613,7 +619,7 @@ def assemble_spatialdata(
     if not cell_mask_path.exists():
         raise FileNotFoundError(cell_mask_path)
 
-    print(f"[spatialdata] loading image pyramid with tifffile: {full_merge_path}", flush=True)
+    print(f"[spatialdata] loading image pyramid with tiffslide/zarr: {full_merge_path}", flush=True)
     full_image, image_canvas, image_details, slide_handle = _load_full_image_from_tiffslide(
         full_merge_path,
         channel_names=channel_names,
