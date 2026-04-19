@@ -139,6 +139,14 @@ def _aggregate_enabled(spatialdata_block: dict[str, Any]) -> bool:
     return bool(spatialdata_block.get("aggregate", True))
 
 
+def _aggregate_cell_labels(spatialdata_block: dict[str, Any]) -> bool:
+    return bool(spatialdata_block.get("aggregate_cell_labels", True))
+
+
+def _aggregate_nuclear_labels(spatialdata_block: dict[str, Any]) -> bool:
+    return bool(spatialdata_block.get("aggregate_nuclear_labels", True))
+
+
 def _derive_shapes(spatialdata_block: dict[str, Any]) -> bool:
     return bool(spatialdata_block.get("derive_shapes", False))
 
@@ -244,14 +252,18 @@ def _plan_result(config: dict[str, Any], slide_id: str) -> dict[str, Any]:
     paths = _spatialdata_paths(slide)
     load_nimbus = _load_nimbus(spatialdata_block, slide)
     aggregate = _aggregate_enabled(spatialdata_block)
+    aggregate_cell_labels = _aggregate_cell_labels(spatialdata_block)
+    aggregate_nuclear_labels = _aggregate_nuclear_labels(spatialdata_block)
     run_on_gpu = _aggregate_run_on_gpu(spatialdata_block)
     dask_scheduler = _cpu_dask_scheduler(spatialdata_block)
     derive_shapes = _derive_shapes(spatialdata_block)
     planned_labels = ["cell_labels", "nuclear_labels"]
     planned_tables = []
     if aggregate:
-        planned_tables.append("agg_cell_labels")
-        planned_tables.append("agg_nuclear_labels")
+        if aggregate_cell_labels:
+            planned_tables.append("agg_cell_labels")
+        if aggregate_nuclear_labels:
+            planned_tables.append("agg_nuclear_labels")
     if load_nimbus:
         planned_tables.append("nimbus_table")
     return {
@@ -267,6 +279,8 @@ def _plan_result(config: dict[str, Any], slide_id: str) -> dict[str, Any]:
         "image_aliases": _full_merge_aliases(config, slide_id),
         "load_nimbus": load_nimbus,
         "aggregate": aggregate,
+        "aggregate_cell_labels": aggregate_cell_labels,
+        "aggregate_nuclear_labels": aggregate_nuclear_labels,
         "run_on_gpu": run_on_gpu,
         "dask_scheduler": dask_scheduler,
         "derive_shapes": derive_shapes,
@@ -436,6 +450,16 @@ def _table_features(table: Any) -> list[str]:
     return [str(value) for value in values]
 
 
+def _chunk_label_array(label_array: Any, *, spatial_chunks: tuple[int, int] | None) -> Any:
+    if spatial_chunks is None:
+        return label_array
+    try:
+        da = _import_dask_array()
+    except ImportError:
+        return label_array
+    return da.from_array(label_array, chunks=tuple(int(value) for value in spatial_chunks))
+
+
 def _allocate_label_intensity(
     *,
     hp: Any,
@@ -453,7 +477,7 @@ def _allocate_label_intensity(
         mode="sum",
         obs_stats=["count"],
         instance_size_key=size_key,
-        chunks=1000,
+        chunks=None,
         append=False,
         calculate_center_of_mass=not run_on_gpu,
         run_on_gpu=run_on_gpu,
@@ -466,6 +490,7 @@ def _allocate_label_intensity(
         "row_count": int(table.n_obs),
         "feature_count": int(table.n_vars),
         "run_on_gpu": bool(run_on_gpu),
+        "chunks": None,
     }
 
 
@@ -606,6 +631,8 @@ def assemble_spatialdata(
     nimbus_table_path = paths["nimbus_table_path"]
     pixel_size_um = float(slide["pixel_size_um"])
     aggregate = _aggregate_enabled(spatialdata_block)
+    aggregate_cell_labels = _aggregate_cell_labels(spatialdata_block)
+    aggregate_nuclear_labels = _aggregate_nuclear_labels(spatialdata_block)
     run_on_gpu = _aggregate_run_on_gpu(spatialdata_block)
     dask_scheduler = _cpu_dask_scheduler(spatialdata_block)
     derive_shapes = _derive_shapes(spatialdata_block)
@@ -628,10 +655,16 @@ def assemble_spatialdata(
 
     try:
         print(f"[spatialdata] loading label masks for {slide_id}", flush=True)
+        label_spatial_chunks = tuple(int(value) for value in image_details["tile_size"])
         cell_mask = tifffile.imread(cell_mask_path)
         if tuple(int(value) for value in cell_mask.shape[-2:]) != image_canvas:
             raise ValueError(f"Cell mask shape {cell_mask.shape} does not match image canvas {image_canvas}.")
-        labels = {"cell_labels": Labels2DModel.parse(cell_mask, dims=("y", "x"))}
+        labels = {
+            "cell_labels": Labels2DModel.parse(
+                _chunk_label_array(cell_mask, spatial_chunks=label_spatial_chunks),
+                dims=("y", "x"),
+            )
+        }
         label_arrays = {"cell_labels": cell_mask}
 
         overlap_diagnostics = None
@@ -641,7 +674,10 @@ def assemble_spatialdata(
                 raise ValueError(
                     f"Nuclear mask shape {nuclear_mask.shape} does not match image canvas {image_canvas}."
                 )
-            labels["nuclear_labels"] = Labels2DModel.parse(nuclear_mask, dims=("y", "x"))
+            labels["nuclear_labels"] = Labels2DModel.parse(
+                _chunk_label_array(nuclear_mask, spatial_chunks=label_spatial_chunks),
+                dims=("y", "x"),
+            )
             label_arrays["nuclear_labels"] = nuclear_mask
             overlap_diagnostics = diagnose_label_overlap_instances(cell_mask, nuclear_mask)
         step_started = _record_timing(timings, "mask_load_seconds", step_started)
@@ -686,8 +722,13 @@ def assemble_spatialdata(
 
         aggregate_tables: list[dict[str, Any]] = []
         if aggregate:
-            print(f"[spatialdata] aggregating intensity tables for {list(sdata.labels.keys())}", flush=True)
-            for label_name in list(sdata.labels.keys()):
+            aggregation_targets = []
+            if aggregate_cell_labels and "cell_labels" in sdata.labels:
+                aggregation_targets.append("cell_labels")
+            if aggregate_nuclear_labels and "nuclear_labels" in sdata.labels:
+                aggregation_targets.append("nuclear_labels")
+            print(f"[spatialdata] aggregating intensity tables for {aggregation_targets}", flush=True)
+            for label_name in aggregation_targets:
                 table_name = _table_region_name(label_name)
                 sdata, table_summary = _allocate_label_intensity(
                     hp=hp,
@@ -761,6 +802,8 @@ def assemble_spatialdata(
             "shapes": list(sdata.shapes.keys()),
             "tables": list(sdata.tables.keys()),
             "aggregate": aggregate,
+            "aggregate_cell_labels": aggregate_cell_labels,
+            "aggregate_nuclear_labels": aggregate_nuclear_labels,
             "run_on_gpu": run_on_gpu,
             "dask_scheduler": dask_scheduler,
             "derive_shapes": derive_shapes,

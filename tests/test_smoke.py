@@ -125,6 +125,8 @@ def write_config(tmp_path: Path) -> Path:
                     "enabled": True,
                     "suffix": "_spatialdata.sdata.zarr",
                     "aggregate": True,
+                    "aggregate_cell_labels": True,
+                    "aggregate_nuclear_labels": True,
                     "run_on_gpu": False,
                     "derive_shapes": False,
                     "load_nimbus": True,
@@ -258,6 +260,8 @@ def write_multislide_config(tmp_path: Path, *, mismatch: bool = False) -> Path:
             "enabled": True,
             "suffix": "_spatialdata.sdata.zarr",
             "aggregate": True,
+            "aggregate_cell_labels": True,
+            "aggregate_nuclear_labels": True,
             "derive_shapes": False,
             "load_nimbus": True,
         },
@@ -1218,6 +1222,8 @@ def test_spatialdata_dry_run_uses_all_channels_by_default(tmp_path: Path):
     assert result["image_aliases"] == ["R0_DAPI", "R0_PANCK"]
     assert result["planned_tables"] == ["agg_cell_labels", "agg_nuclear_labels", "nimbus_table"]
     assert result["aggregate"] is True
+    assert result["aggregate_cell_labels"] is True
+    assert result["aggregate_nuclear_labels"] is True
     assert result["derive_shapes"] is False
     assert result["load_nimbus"] is True
 
@@ -1231,6 +1237,18 @@ def test_spatialdata_dry_run_can_skip_nimbus_table(tmp_path: Path):
 
     assert result["planned_tables"] == ["agg_cell_labels", "agg_nuclear_labels"]
     assert result["load_nimbus"] is False
+
+
+def test_spatialdata_dry_run_can_toggle_aggregation_targets(tmp_path: Path):
+    config_path = write_config(tmp_path)
+    config = load_config(config_path)
+    config["slides"]["SLIDE-0272"]["spatialdata"]["aggregate_nuclear_labels"] = False
+
+    result = build_spatialdata(config, "SLIDE-0272", dry_run=True)
+
+    assert result["planned_tables"] == ["agg_cell_labels", "nimbus_table"]
+    assert result["aggregate_cell_labels"] is True
+    assert result["aggregate_nuclear_labels"] is False
 
 
 def test_spatialdata_dry_run_can_plan_derived_shapes(tmp_path: Path):
@@ -1275,7 +1293,7 @@ def _install_spatialdata_assembly_stubs(monkeypatch):
             self.shape = (len(channels), 2, 2)
             self.dims = ("c", "y", "x")
             self.coords = {"c": DummyCoord(channels)}
-            self.data = types.SimpleNamespace(chunks=((1,) * len(channels), (2,), (2,)))
+            self.data = types.SimpleNamespace(chunks=((1,) * len(channels), (2,), (2,)), chunksize=(1, 2, 2))
             self._transform = DummyTransform(1.0, 1.0)
 
     class DummyImageTree:
@@ -1333,7 +1351,7 @@ def _install_spatialdata_assembly_stubs(monkeypatch):
     class DummyLabels2DModel:
         @staticmethod
         def parse(array, dims=None):
-            return DummyElement("labels", np.asarray(array))
+            return DummyElement("labels", array)
 
     class DummyShapesModel:
         @staticmethod
@@ -1376,7 +1394,8 @@ def _install_spatialdata_assembly_stubs(monkeypatch):
                 run_on_gpu,
                 overwrite,
             ):
-                label_payload = sdata.labels[labels_layer].payload
+                assert chunks is None
+                label_payload = np.asarray(sdata.labels[labels_layer].payload)
                 labels = sorted(int(value) for value in np.unique(label_payload) if value > 0)
                 obs = pd.DataFrame({"instance_id": [str(label) for label in labels]})
                 obs.index = obs["instance_id"]
@@ -1505,6 +1524,39 @@ def test_build_spatialdata_execution_with_stubs(monkeypatch, tmp_path: Path):
         "nuclear_boundaries": 0.325,
     }
     assert Path(result["store_path"]).exists()
+
+
+def test_build_spatialdata_execution_can_skip_nuclear_aggregation(monkeypatch, tmp_path: Path):
+    import pandas as pd
+
+    config_path = write_config(tmp_path)
+    config = load_config(config_path)
+    config["slides"]["SLIDE-0272"]["spatialdata"]["aggregate_nuclear_labels"] = False
+    slide = get_slide_config(config, "SLIDE-0272")
+    paths = spatialdata_builder_module._spatialdata_paths(slide)
+
+    paths["full_merge_path"].write_bytes(b"fake")
+    paths["cell_mask_path"].parent.mkdir(parents=True, exist_ok=True)
+    tf.imwrite(paths["cell_mask_path"], np.array([[0, 1], [2, 2]], dtype=np.uint32))
+    tf.imwrite(paths["nuclear_mask_path"], np.array([[0, 1], [0, 2]], dtype=np.uint32))
+    paths["nimbus_table_path"].parent.mkdir(parents=True, exist_ok=True)
+    pd.DataFrame(
+        {
+            "cell_id": [1, 2],
+            "fov": ["SLIDE-0272", "SLIDE-0272"],
+            "slide_id": ["SLIDE-0272", "SLIDE-0272"],
+            "SLIDE-0272_0.0.2_R000_DAPI_F_Tiled": [0.1, 0.2],
+            "SLIDE-0272_0.0.2_R001_PANCK_F_Tiled": [0.3, 0.4],
+        }
+    ).to_csv(paths["nimbus_table_path"], index=False)
+
+    _install_spatialdata_assembly_stubs(monkeypatch)
+    result = build_spatialdata(config, "SLIDE-0272", dry_run=False, return_sdata=True)
+
+    assert result["aggregate_cell_labels"] is True
+    assert result["aggregate_nuclear_labels"] is False
+    assert result["tables"] == ["agg_cell_labels", "nimbus_table"]
+    assert [entry["name"] for entry in result["aggregate_tables"]] == ["agg_cell_labels"]
 
 
 def test_build_spatialdata_execution_can_skip_missing_nimbus(monkeypatch, tmp_path: Path):

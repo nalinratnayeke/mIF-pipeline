@@ -203,6 +203,8 @@ slides:
       enabled: false
       suffix: _spatialdata.sdata.zarr
       aggregate: true
+      aggregate_cell_labels: true
+      aggregate_nuclear_labels: true
       run_on_gpu: false
       dask_scheduler: processes
       derive_shapes: false
