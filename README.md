@@ -230,7 +230,11 @@ from mif_pipeline.nimbus_runner import (
     run_nimbus_multislide,
 )
 from mif_pipeline.qc import qc_slide
-from mif_pipeline.spatialdata_builder import assemble_spatialdata
+from mif_pipeline.spatialdata_builder import (
+    assemble_spatialdata,
+    finalize_spatialdata,
+    write_spatialdata_base,
+)
 ```
 
 Expected high-level functions:
@@ -242,6 +246,8 @@ Expected high-level functions:
 - `run_nimbus_chunked(config, slide_id) -> dict`
 - `run_nimbus_multislide(config, slide_ids=None, *, chunk_indices=None) -> dict`
 - `finalize_nimbus_multislide(config, slide_ids=None) -> dict`
+- `write_spatialdata_base(config, slide_id) -> dict`
+- `finalize_spatialdata(config, slide_id) -> dict`
 - `assemble_spatialdata(config, slide_id) -> dict`
 - `qc_slide(config, slide_id) -> dict`
 - `run_all(config, slide_id) -> dict` for same-environment stages only
@@ -256,6 +262,10 @@ A minimal direct-Python example notebook is available at `scripts/mif_pipeline_p
 `spatialdata.load_nimbus` supports:
 - `true`: import `nimbus/cell_table_full.csv` as `nimbus_table`
 - `false`: skip Nimbus import and build SpatialData from image, labels, shapes, and aggregate tables only
+
+`assemble_spatialdata(...)` now behaves as a convenience wrapper over two explicit steps:
+- `write_spatialdata_base(...)`: write the canonical image+labels SpatialData/Zarr store
+- `finalize_spatialdata(...)`: reopen that same store, run aggregation / optional shapes / optional Nimbus import, and persist the new elements in place
 
 `nimbus.enabled` supports:
 - `true`: run Nimbus chunking and write `nimbus/cell_table_full.csv`

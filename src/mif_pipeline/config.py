@@ -236,7 +236,7 @@ def get_slide_config(config: dict[str, Any], slide_id: str) -> dict[str, Any]:
 
     spatialdata = resolved.get("spatialdata")
     if isinstance(spatialdata, dict):
-        suffix = spatialdata.get("suffix", "_spatialdata.sdata.zarr")
+        suffix = spatialdata.get("suffix")
         legacy_store_path = spatialdata.get("store_path")
         if suffix is not None and legacy_store_path is not None:
             raise ValueError(
@@ -251,6 +251,13 @@ def get_slide_config(config: dict[str, Any], slide_id: str) -> dict[str, Any]:
         else:
             spatialdata["store_path"] = str(
                 resolve_slide_output_name(slide_id, "_spatialdata.sdata.zarr", output_dir)
+            )
+        if spatialdata.get("base_suffix") is not None or spatialdata.get("base_store_path") is not None:
+            raise ValueError(
+                f"Slide {slide_id} uses legacy intermediate SpatialData settings "
+                "('base_suffix'/'base_store_path'), but the pipeline now writes and finalizes a single canonical "
+                "SpatialData store in place. Remove those keys and keep only 'spatialdata.suffix' or "
+                "'spatialdata.store_path'."
             )
 
     return resolved

@@ -36,7 +36,7 @@ from mif_pipeline.nimbus_runner import (
 from mif_pipeline.pipeline import run_all
 from mif_pipeline.setup import setup_slide, setup_slides
 import mif_pipeline.spatialdata_builder as spatialdata_builder_module
-from mif_pipeline.spatialdata_builder import build_spatialdata
+from mif_pipeline.spatialdata_builder import build_spatialdata, finalize_spatialdata, write_spatialdata_base
 
 
 def write_config(tmp_path: Path) -> Path:
@@ -1197,6 +1197,19 @@ def test_get_slide_config_resolves_spatialdata_store_path(tmp_path: Path):
     )
 
 
+def test_get_slide_config_rejects_legacy_spatialdata_base_store_settings(tmp_path: Path):
+    config_path = write_config(tmp_path)
+    config = load_config(config_path)
+    config["slides"]["SLIDE-0272"]["spatialdata"]["base_store_path"] = "custom/base_store.zarr"
+
+    try:
+        get_slide_config(config, "SLIDE-0272")
+    except ValueError as exc:
+        assert "legacy intermediate SpatialData settings" in str(exc)
+    else:
+        raise AssertionError("Expected legacy base-store settings to raise ValueError.")
+
+
 def test_spatialdata_prefers_multislide_per_slide_nimbus_table_path(tmp_path: Path):
     config_path = write_config(tmp_path)
     config = load_config(config_path)
@@ -1221,6 +1234,7 @@ def test_spatialdata_dry_run_uses_all_channels_by_default(tmp_path: Path):
     result = build_spatialdata(config, "SLIDE-0272", dry_run=True)
 
     assert result["status"] == "planned"
+    assert result["store_path"].endswith("_spatialdata.sdata.zarr")
     assert result["image_aliases"] == ["R0_DAPI", "R0_PANCK"]
     assert result["planned_tables"] == ["agg_cell_labels", "agg_nuclear_labels", "nimbus_table"]
     assert result["aggregate"] is True
@@ -1286,6 +1300,7 @@ def test_dry_run_pipeline_stops_before_spatialdata(tmp_path: Path):
 
 def _install_spatialdata_assembly_stubs(monkeypatch):
     import pandas as pd
+    store_registry: dict[str, object] = {}
 
     class DummyTransform:
         def __init__(self, sx=1.0, sy=1.0):
@@ -1346,6 +1361,7 @@ def _install_spatialdata_assembly_stubs(monkeypatch):
             self.labels = labels or {}
             self.shapes = shapes or {}
             self.tables = tables or {}
+            self.path = None
 
         def __setitem__(self, key, value):
             if getattr(value, "kind", None) == "shapes":
@@ -1360,6 +1376,23 @@ def _install_spatialdata_assembly_stubs(monkeypatch):
         def write(self, path, overwrite=False):
             path.mkdir(parents=True, exist_ok=True)
             (path / "zarr.json").write_text("{}", encoding="utf-8")
+            self.path = str(path)
+            store_registry[str(path)] = self
+
+        def write_element(self, element_name, overwrite=False, **kwargs):
+            assert self.path is not None
+            names = [element_name] if isinstance(element_name, str) else list(element_name)
+            assert all(isinstance(name, str) for name in names)
+            assert overwrite is False
+            store_registry[self.path] = self
+
+        def delete_element_from_disk(self, element_name):
+            assert self.path is not None
+            store_registry[self.path] = self
+
+        def write_transformations(self, element_name=None):
+            assert self.path is not None
+            store_registry[self.path] = self
 
     class DummyLabels2DModel:
         @staticmethod
@@ -1444,6 +1477,7 @@ def _install_spatialdata_assembly_stubs(monkeypatch):
         lambda: (
             DummySpatialdataModule,
             DummySpatialData,
+            lambda path: store_registry[str(path)],
             DummyLabels2DModel,
             DummyShapesModel,
             DummyTableModel,
@@ -1464,22 +1498,8 @@ def test_build_spatialdata_import_guard(monkeypatch, tmp_path: Path):
     paths = spatialdata_builder_module._spatialdata_paths(slide)
     paths["full_merge_path"].write_bytes(b"fake")
     paths["cell_mask_path"].parent.mkdir(parents=True, exist_ok=True)
-    tf.imwrite(paths["cell_mask_path"], np.ones((4, 4), dtype=np.uint32))
-
-    monkeypatch.setattr(
-        spatialdata_builder_module,
-        "_import_spatialdata",
-        lambda: (
-            types.SimpleNamespace(),
-            object,
-            object,
-            object,
-            object,
-            lambda: None,
-            object,
-            lambda *args, **kwargs: None,
-        ),
-    )
+    tf.imwrite(paths["cell_mask_path"], np.ones((2, 2), dtype=np.uint32))
+    _install_spatialdata_assembly_stubs(monkeypatch)
     monkeypatch.setattr(
         spatialdata_builder_module,
         "_import_harpy",
@@ -1522,10 +1542,18 @@ def test_build_spatialdata_execution_with_stubs(monkeypatch, tmp_path: Path):
     result = build_spatialdata(config, "SLIDE-0272", dry_run=False, return_sdata=True)
 
     assert result["status"] == "written"
+    assert Path(result["store_path"]).exists()
     assert result["image_loader"] == "tiffslide_zarr"
     assert result["labels"] == ["cell_labels", "nuclear_labels"]
     assert result["shapes"] == ["cell_boundaries", "nuclear_boundaries"]
     assert result["tables"] == ["agg_cell_labels", "agg_nuclear_labels", "nimbus_table"]
+    assert result["written_elements"] == [
+        "cell_boundaries",
+        "nuclear_boundaries",
+        "agg_cell_labels",
+        "agg_nuclear_labels",
+        "nimbus_table",
+    ]
     assert result["aggregate_tables"][0]["features"] == ["R0_DAPI", "R0_PANCK"]
     assert result["aggregate_tables"][1]["features"] == ["R0_DAPI", "R0_PANCK"]
     assert result["sdata"].tables["nimbus_table"].var_names.tolist() == ["R0_DAPI", "R0_PANCK"]
@@ -1537,6 +1565,39 @@ def test_build_spatialdata_execution_with_stubs(monkeypatch, tmp_path: Path):
         "nuclear_boundaries": 0.325,
     }
     assert Path(result["store_path"]).exists()
+
+
+def test_write_spatialdata_base_execution_with_stubs(monkeypatch, tmp_path: Path):
+    config_path = write_config(tmp_path)
+    config = load_config(config_path)
+    slide = get_slide_config(config, "SLIDE-0272")
+    paths = spatialdata_builder_module._spatialdata_paths(slide)
+
+    paths["full_merge_path"].write_bytes(b"fake")
+    paths["cell_mask_path"].parent.mkdir(parents=True, exist_ok=True)
+    tf.imwrite(paths["cell_mask_path"], np.array([[0, 1], [2, 2]], dtype=np.uint32))
+    tf.imwrite(paths["nuclear_mask_path"], np.array([[0, 1], [0, 2]], dtype=np.uint32))
+
+    _install_spatialdata_assembly_stubs(monkeypatch)
+    result = write_spatialdata_base(config, "SLIDE-0272", dry_run=False, return_sdata=True)
+
+    assert result["stage"] == "write_base"
+    assert result["labels"] == ["cell_labels", "nuclear_labels"]
+    assert Path(result["store_path"]).exists()
+    assert result["sdata"].tables == {}
+    assert result["sdata"].shapes == {}
+
+
+def test_finalize_spatialdata_requires_store(tmp_path: Path):
+    config_path = write_config(tmp_path)
+    config = load_config(config_path)
+
+    try:
+        finalize_spatialdata(config, "SLIDE-0272", dry_run=False)
+    except FileNotFoundError:
+        pass
+    else:
+        raise AssertionError("Expected finalize_spatialdata() to require an existing SpatialData store.")
 
 
 def test_build_spatialdata_execution_can_skip_nuclear_aggregation(monkeypatch, tmp_path: Path):

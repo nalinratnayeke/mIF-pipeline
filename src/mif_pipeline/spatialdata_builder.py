@@ -18,14 +18,14 @@ from .config import (
 def _import_spatialdata():
     try:
         import spatialdata
-        from spatialdata import SpatialData
+        from spatialdata import SpatialData, read_zarr
         from spatialdata.models import Labels2DModel, ShapesModel, TableModel
         from spatialdata.transformations import Identity, Scale, set_transformation
     except ImportError as exc:
         raise ImportError(
             "SpatialData assembly requires 'spatialdata' in the active environment."
         ) from exc
-    return spatialdata, SpatialData, Labels2DModel, ShapesModel, TableModel, Identity, Scale, set_transformation
+    return spatialdata, SpatialData, read_zarr, Labels2DModel, ShapesModel, TableModel, Identity, Scale, set_transformation
 
 
 def _import_xarray():
@@ -122,12 +122,13 @@ def _nimbus_table_path(slide: dict[str, Any]) -> Path:
 def _spatialdata_paths(slide: dict[str, Any]) -> dict[str, Path]:
     full_merge = slide.get("full_merge") or {}
     cell_mask_path, nuclear_mask_path = _mask_paths(slide)
+    spatialdata_block = slide.get("spatialdata") or {}
     return {
         "full_merge_path": Path(full_merge["ome_path"]),
         "cell_mask_path": cell_mask_path,
         "nuclear_mask_path": nuclear_mask_path,
         "nimbus_table_path": _nimbus_table_path(slide),
-        "store_path": Path((slide.get("spatialdata") or {})["store_path"]),
+        "store_path": Path(spatialdata_block["store_path"]),
     }
 
 
@@ -296,6 +297,13 @@ def _plan_result(config: dict[str, Any], slide_id: str) -> dict[str, Any]:
     }
 
 
+def _remove_store_if_requested(path: Path, *, force: bool) -> None:
+    if path.exists() and force:
+        import shutil
+
+        shutil.rmtree(path)
+
+
 def _level_keys_from_multiscales(zarr_img: Any) -> list[str]:
     multiscales = (zarr_img.attrs or {}).get("multiscales")
     if multiscales:
@@ -390,6 +398,30 @@ def _set_global_scale(element: Any, pixel_size_um: float, Scale: Any, set_transf
 
 def _set_global_identity(element: Any, Identity: Any, set_transformation: Any) -> None:
     set_transformation(element, {"global": Identity()}, set_all=True)
+
+
+def _update_global_scale(element: Any, pixel_size_um: float, Scale: Any, set_transformation: Any) -> None:
+    transform = Scale([pixel_size_um, pixel_size_um], axes=("y", "x"))
+    set_transformation(element, transform, to_coordinate_system="global")
+
+
+def _persist_backed_elements(sdata: Any, element_names: list[str]) -> None:
+    if not element_names:
+        return
+    unique_names = list(dict.fromkeys(element_names))
+    for element_name in unique_names:
+        exists_on_sdata = (
+            element_name in getattr(sdata, "images", {})
+            or element_name in getattr(sdata, "labels", {})
+            or element_name in getattr(sdata, "shapes", {})
+            or element_name in getattr(sdata, "tables", {})
+        )
+        if exists_on_sdata:
+            try:
+                sdata.delete_element_from_disk(element_name)
+            except Exception:
+                pass
+        sdata.write_element(element_name, overwrite=False)
 
 
 def _vectorize_label_layer(
@@ -561,6 +593,18 @@ def _scale_table_spatial_coordinates(table: Any, *, pixel_size_um: float, spatia
         return
 
 
+def _materialize_label_array(label_element: Any) -> Any:
+    data = getattr(label_element, "data", None)
+    if data is not None:
+        compute = getattr(data, "compute", None)
+        return compute() if callable(compute) else data
+    payload = getattr(label_element, "payload", None)
+    if payload is not None:
+        compute = getattr(payload, "compute", None)
+        return compute() if callable(compute) else payload
+    return label_element
+
+
 def diagnose_label_overlap_instances(cell_mask: Any, nuclear_mask: Any) -> dict[str, Any]:
     import numpy as np
 
@@ -598,15 +642,24 @@ def diagnose_label_overlap_instances(cell_mask: Any, nuclear_mask: Any) -> dict[
     }
 
 
-def assemble_spatialdata(
+def _aggregation_targets(sdata: Any, *, aggregate_cell_labels: bool, aggregate_nuclear_labels: bool) -> list[str]:
+    targets: list[str] = []
+    if aggregate_cell_labels and "cell_labels" in sdata.labels:
+        targets.append("cell_labels")
+    if aggregate_nuclear_labels and "nuclear_labels" in sdata.labels:
+        targets.append("nuclear_labels")
+    return targets
+
+
+def write_spatialdata_base(
     config: Union[dict[str, Any], str, Path],
     slide_id: str,
     *,
     force: bool = False,
     dry_run: bool = False,
-    return_sdata: bool = True,
+    return_sdata: bool = False,
 ) -> dict[str, Any]:
-    """Assemble the final SpatialData object from merged TIFFs, labels, and optional Nimbus outputs."""
+    """Write the base image+labels SpatialData store."""
     config = ensure_config(config)
     slide = get_slide_config(config, slide_id)
     spatialdata_block = _spatialdata_block(slide)
@@ -616,7 +669,9 @@ def assemble_spatialdata(
 
     planned = _plan_result(config, slide_id)
     if dry_run:
-        return planned
+        result = dict(planned)
+        result["stage"] = "write_base"
+        return result
 
     paths = _spatialdata_paths(slide)
     store_path = paths["store_path"]
@@ -624,27 +679,18 @@ def assemble_spatialdata(
         result = dict(planned)
         result["status"] = "skipped"
         result["dry_run"] = False
+        result["stage"] = "write_base"
         return result
 
-    spatialdata, SpatialData, Labels2DModel, ShapesModel, TableModel, Identity, Scale, set_transformation = _import_spatialdata()
-    hp = _import_harpy()
+    spatialdata, SpatialData, read_zarr, Labels2DModel, ShapesModel, TableModel, Identity, Scale, set_transformation = _import_spatialdata()
     tifffile = _import_tifffile()
-    ad = _import_anndata()
 
     full_merge_path = paths["full_merge_path"]
     cell_mask_path = paths["cell_mask_path"]
     nuclear_mask_path = paths["nuclear_mask_path"]
-    nimbus_table_path = paths["nimbus_table_path"]
-    pixel_size_um = float(slide["pixel_size_um"])
-    aggregate = _aggregate_enabled(spatialdata_block)
-    aggregate_cell_labels = _aggregate_cell_labels(spatialdata_block)
-    aggregate_nuclear_labels = _aggregate_nuclear_labels(spatialdata_block)
-    run_on_gpu = _aggregate_run_on_gpu(spatialdata_block)
-    dask_scheduler = _cpu_dask_scheduler(spatialdata_block)
-    derive_shapes = _derive_shapes(spatialdata_block)
     check_label_overlap = _check_label_overlap(spatialdata_block)
-    load_nimbus = _load_nimbus(spatialdata_block, slide)
     channel_names = _full_merge_aliases(config, slide_id)
+    pixel_size_um = float(slide["pixel_size_um"])
     timings: dict[str, float] = {}
     started_at = perf_counter()
 
@@ -690,137 +736,34 @@ def assemble_spatialdata(
                 overlap_diagnostics = diagnose_label_overlap_instances(cell_mask, nuclear_mask)
         step_started = _record_timing(timings, "mask_load_seconds", step_started)
 
+        # Keep rasters in pixel space for the base store. Harpy aggregation currently
+        # expects translation-style transforms and errors on Scale transforms here.
         _set_global_identity(full_image, Identity, set_transformation)
         for label_element in labels.values():
             _set_global_identity(label_element, Identity, set_transformation)
 
         sdata = SpatialData(images={"full_image": full_image}, labels=labels)
-        transform_updates: dict[str, float] = {}
-
-        vectorization: list[dict[str, Any]] = []
-        if derive_shapes:
-            print(f"[spatialdata] deriving shapes from labels: {list(sdata.labels.keys())}", flush=True)
-            dask_context = nullcontext()
-            if not run_on_gpu and dask_scheduler is not None:
-                try:
-                    dask = _import_dask()
-                except ImportError:
-                    print(
-                        "[spatialdata] Dask not available; using default scheduler for CPU vectorization",
-                        flush=True,
-                    )
-                else:
-                    print(
-                        f"[spatialdata] using Dask scheduler={dask_scheduler!r} for CPU vectorization",
-                        flush=True,
-                    )
-                    dask_context = dask.config.set(scheduler=dask_scheduler)
-            with dask_context:
-                for label_name in list(sdata.labels.keys()):
-                    vectorization.append(
-                        _vectorize_label_layer(
-                            sdata,
-                            spatialdata=spatialdata,
-                            label_name=label_name,
-                            shape_name=_shape_name(label_name),
-                            ShapesModel=ShapesModel,
-                        )
-                    )
-            step_started = _record_timing(timings, "shape_derivation_seconds", step_started)
-
-        aggregate_tables: list[dict[str, Any]] = []
-        if aggregate:
-            aggregation_targets = []
-            if aggregate_cell_labels and "cell_labels" in sdata.labels:
-                aggregation_targets.append("cell_labels")
-            if aggregate_nuclear_labels and "nuclear_labels" in sdata.labels:
-                aggregation_targets.append("nuclear_labels")
-            print(f"[spatialdata] aggregating intensity tables for {aggregation_targets}", flush=True)
-            for label_name in aggregation_targets:
-                table_name = _table_region_name(label_name)
-                sdata, table_summary = _allocate_label_intensity(
-                    hp=hp,
-                    sdata=sdata,
-                    label_name=label_name,
-                    table_name=table_name,
-                    run_on_gpu=run_on_gpu,
-                )
-                sdata.tables[table_name] = _normalize_table_features(
-                    sdata.tables[table_name],
-                    config=config,
-                    slide_id=slide_id,
-                )
-                if run_on_gpu:
-                    _set_table_centroids_from_labels(
-                        sdata.tables[table_name],
-                        label_array=label_arrays[label_name],
-                    )
-                _scale_table_spatial_coordinates(sdata.tables[table_name], pixel_size_um=pixel_size_um)
-                table_summary["features"] = _table_features(sdata.tables[table_name])
-                aggregate_tables.append(table_summary)
-            step_started = _record_timing(timings, "aggregation_seconds", step_started)
-
-        nimbus_loaded = False
-        if load_nimbus and nimbus_table_path.exists():
-            print(f"[spatialdata] importing Nimbus table: {nimbus_table_path}", flush=True)
-            sdata["nimbus_table"] = _import_nimbus_table(
-                nimbus_table_path,
-                config=config,
-                slide_id=slide_id,
-                TableModel=TableModel,
-                ad=ad,
-            )
-            nimbus_loaded = True
-            step_started = _record_timing(timings, "nimbus_import_seconds", step_started)
-        elif load_nimbus:
-            print(f"[spatialdata] Nimbus table missing, skipping import: {nimbus_table_path}", flush=True)
-
-        _set_global_scale(sdata.images["full_image"], pixel_size_um, Scale, set_transformation)
-        transform_updates["full_image"] = pixel_size_um
-        for label_name in list(sdata.labels.keys()):
-            _set_global_scale(sdata.labels[label_name], pixel_size_um, Scale, set_transformation)
-            transform_updates[label_name] = pixel_size_um
-        for shape_name in list(sdata.shapes.keys()):
-            _set_global_scale(sdata.shapes[shape_name], pixel_size_um, Scale, set_transformation)
-            transform_updates[shape_name] = pixel_size_um
-
-        if store_path.exists() and force:
-            import shutil
-
-            shutil.rmtree(store_path)
-
-        print(f"[spatialdata] writing final store: {store_path}", flush=True)
+        _remove_store_if_requested(store_path, force=force)
+        print(f"[spatialdata] writing base store: {store_path}", flush=True)
         sdata.write(store_path, overwrite=force)
-        step_started = _record_timing(timings, "write_seconds", step_started)
+        step_started = _record_timing(timings, "write_base_seconds", step_started)
         timings["total_seconds"] = round(perf_counter() - started_at, 3)
 
         result = {
             "slide_id": slide_id,
             "status": "written",
             "dry_run": False,
+            "stage": "write_base",
             "image_loader": image_details["loader"],
             "full_merge_path": str(full_merge_path),
             "store_path": str(store_path),
             "cell_mask_path": str(cell_mask_path),
             "nuclear_mask_path": str(nuclear_mask_path),
-            "nimbus_table_path": str(nimbus_table_path),
             "image_aliases": channel_names,
             "image_level_keys": image_details["level_keys"],
             "labels": list(sdata.labels.keys()),
-            "shapes": list(sdata.shapes.keys()),
-            "tables": list(sdata.tables.keys()),
-            "aggregate": aggregate,
-            "aggregate_cell_labels": aggregate_cell_labels,
-            "aggregate_nuclear_labels": aggregate_nuclear_labels,
-            "run_on_gpu": run_on_gpu,
-            "dask_scheduler": dask_scheduler,
-            "derive_shapes": derive_shapes,
             "check_label_overlap": check_label_overlap,
-            "load_nimbus": load_nimbus,
-            "nimbus_loaded": nimbus_loaded,
-            "aggregate_tables": aggregate_tables,
-            "vectorization": vectorization,
-            "transform_updates": transform_updates,
+            "image_level_details": image_details["level_details"],
             "overlap_diagnostics": overlap_diagnostics,
             "timings": timings,
         }
@@ -832,6 +775,241 @@ def assemble_spatialdata(
             slide_handle.close()
         except Exception:
             pass
+
+
+def finalize_spatialdata(
+    config: Union[dict[str, Any], str, Path],
+    slide_id: str,
+    *,
+    force: bool = False,
+    dry_run: bool = False,
+    return_sdata: bool = True,
+) -> dict[str, Any]:
+    """Reopen the canonical SpatialData store and append tables/shapes in place."""
+    config = ensure_config(config)
+    slide = get_slide_config(config, slide_id)
+    spatialdata_block = _spatialdata_block(slide)
+
+    if not spatialdata_block.get("enabled", False):
+        return {"slide_id": slide_id, "status": "disabled", "dry_run": dry_run}
+
+    planned = _plan_result(config, slide_id)
+    if dry_run:
+        result = dict(planned)
+        result["stage"] = "finalize"
+        return result
+
+    paths = _spatialdata_paths(slide)
+    store_path = paths["store_path"]
+    if not store_path.exists():
+        raise FileNotFoundError(store_path)
+
+    spatialdata, SpatialData, read_zarr, Labels2DModel, ShapesModel, TableModel, Identity, Scale, set_transformation = _import_spatialdata()
+    hp = _import_harpy()
+    ad = _import_anndata()
+
+    pixel_size_um = float(slide["pixel_size_um"])
+    aggregate = _aggregate_enabled(spatialdata_block)
+    aggregate_cell_labels = _aggregate_cell_labels(spatialdata_block)
+    aggregate_nuclear_labels = _aggregate_nuclear_labels(spatialdata_block)
+    run_on_gpu = _aggregate_run_on_gpu(spatialdata_block)
+    dask_scheduler = _cpu_dask_scheduler(spatialdata_block)
+    derive_shapes = _derive_shapes(spatialdata_block)
+    check_label_overlap = _check_label_overlap(spatialdata_block)
+    load_nimbus = _load_nimbus(spatialdata_block, slide)
+    nimbus_table_path = paths["nimbus_table_path"]
+    timings: dict[str, float] = {}
+    started_at = perf_counter()
+
+    print(f"[spatialdata] reopening store for finalize: {store_path}", flush=True)
+    sdata = read_zarr(store_path)
+    step_started = _record_timing(timings, "read_store_seconds", started_at)
+
+    label_arrays: dict[str, Any] = {}
+    for label_name in list(sdata.labels.keys()):
+        label_arrays[label_name] = _materialize_label_array(sdata.labels[label_name])
+
+    vectorization: list[dict[str, Any]] = []
+    elements_to_write: list[str] = []
+    if derive_shapes:
+        print(f"[spatialdata] deriving shapes from labels: {list(sdata.labels.keys())}", flush=True)
+        dask_context = nullcontext()
+        if not run_on_gpu and dask_scheduler is not None:
+            try:
+                dask = _import_dask()
+            except ImportError:
+                print("[spatialdata] Dask not available; using default scheduler for CPU vectorization", flush=True)
+            else:
+                print(f"[spatialdata] using Dask scheduler={dask_scheduler!r} for CPU vectorization", flush=True)
+                dask_context = dask.config.set(scheduler=dask_scheduler)
+        with dask_context:
+            for label_name in list(sdata.labels.keys()):
+                shape_name = _shape_name(label_name)
+                vectorization.append(
+                    _vectorize_label_layer(
+                        sdata,
+                        spatialdata=spatialdata,
+                        label_name=label_name,
+                        shape_name=shape_name,
+                        ShapesModel=ShapesModel,
+                    )
+                )
+                elements_to_write.append(shape_name)
+        step_started = _record_timing(timings, "shape_derivation_seconds", step_started)
+
+    aggregate_tables: list[dict[str, Any]] = []
+    if aggregate:
+        targets = _aggregation_targets(
+            sdata,
+            aggregate_cell_labels=aggregate_cell_labels,
+            aggregate_nuclear_labels=aggregate_nuclear_labels,
+        )
+        print(f"[spatialdata] aggregating intensity tables for {targets}", flush=True)
+        for label_name in targets:
+            table_name = _table_region_name(label_name)
+            sdata, table_summary = _allocate_label_intensity(
+                hp=hp,
+                sdata=sdata,
+                label_name=label_name,
+                table_name=table_name,
+                run_on_gpu=run_on_gpu,
+            )
+            sdata.tables[table_name] = _normalize_table_features(
+                sdata.tables[table_name],
+                config=config,
+                slide_id=slide_id,
+            )
+            if run_on_gpu:
+                _set_table_centroids_from_labels(
+                    sdata.tables[table_name],
+                    label_array=label_arrays[label_name],
+                )
+            _scale_table_spatial_coordinates(sdata.tables[table_name], pixel_size_um=pixel_size_um)
+            table_summary["features"] = _table_features(sdata.tables[table_name])
+            aggregate_tables.append(table_summary)
+            elements_to_write.append(table_name)
+        step_started = _record_timing(timings, "aggregation_seconds", step_started)
+
+    nimbus_loaded = False
+    if load_nimbus and nimbus_table_path.exists():
+        print(f"[spatialdata] importing Nimbus table: {nimbus_table_path}", flush=True)
+        sdata["nimbus_table"] = _import_nimbus_table(
+            nimbus_table_path,
+            config=config,
+            slide_id=slide_id,
+            TableModel=TableModel,
+            ad=ad,
+        )
+        nimbus_loaded = True
+        elements_to_write.append("nimbus_table")
+        step_started = _record_timing(timings, "nimbus_import_seconds", step_started)
+    elif load_nimbus:
+        print(f"[spatialdata] Nimbus table missing, skipping import: {nimbus_table_path}", flush=True)
+
+    if elements_to_write:
+        print(f"[spatialdata] writing updated elements into store: {elements_to_write}", flush=True)
+        _persist_backed_elements(sdata, elements_to_write)
+    else:
+        print("[spatialdata] no new tables or shapes to write during finalize", flush=True)
+    step_started = _record_timing(timings, "write_elements_seconds", step_started)
+
+    transform_updates: dict[str, float] = {}
+    _update_global_scale(sdata.images["full_image"], pixel_size_um, Scale, set_transformation)
+    transform_updates["full_image"] = pixel_size_um
+    for label_name in list(sdata.labels.keys()):
+        _update_global_scale(sdata.labels[label_name], pixel_size_um, Scale, set_transformation)
+        transform_updates[label_name] = pixel_size_um
+    for shape_name in list(sdata.shapes.keys()):
+        _update_global_scale(sdata.shapes[shape_name], pixel_size_um, Scale, set_transformation)
+        transform_updates[shape_name] = pixel_size_um
+    print("[spatialdata] writing updated transformations to store", flush=True)
+    sdata.write_transformations()
+    step_started = _record_timing(timings, "write_transformations_seconds", step_started)
+
+    timings["total_seconds"] = round(perf_counter() - started_at, 3)
+
+    result = {
+        "slide_id": slide_id,
+        "status": "written",
+        "dry_run": False,
+        "stage": "finalize",
+        "store_path": str(store_path),
+        "nimbus_table_path": str(nimbus_table_path),
+        "labels": list(sdata.labels.keys()),
+        "shapes": list(sdata.shapes.keys()),
+        "tables": list(sdata.tables.keys()),
+        "aggregate": aggregate,
+        "aggregate_cell_labels": aggregate_cell_labels,
+        "aggregate_nuclear_labels": aggregate_nuclear_labels,
+        "run_on_gpu": run_on_gpu,
+        "dask_scheduler": dask_scheduler,
+        "derive_shapes": derive_shapes,
+        "check_label_overlap": check_label_overlap,
+        "load_nimbus": load_nimbus,
+        "nimbus_loaded": nimbus_loaded,
+        "aggregate_tables": aggregate_tables,
+        "vectorization": vectorization,
+        "transform_updates": transform_updates,
+        "written_elements": list(dict.fromkeys(elements_to_write)),
+        "timings": timings,
+    }
+    if return_sdata:
+        result["sdata"] = sdata
+    return result
+
+
+def assemble_spatialdata(
+    config: Union[dict[str, Any], str, Path],
+    slide_id: str,
+    *,
+    force: bool = False,
+    dry_run: bool = False,
+    return_sdata: bool = True,
+) -> dict[str, Any]:
+    """Convenience wrapper that writes the base store, then enriches that same store in place."""
+    config = ensure_config(config)
+    slide = get_slide_config(config, slide_id)
+    spatialdata_block = _spatialdata_block(slide)
+
+    if not spatialdata_block.get("enabled", False):
+        return {"slide_id": slide_id, "status": "disabled", "dry_run": dry_run}
+
+    if dry_run:
+        result = _plan_result(config, slide_id)
+        result["stage"] = "assemble"
+        return result
+
+    base_result = write_spatialdata_base(
+        config,
+        slide_id,
+        force=force,
+        dry_run=False,
+        return_sdata=False,
+    )
+    finalize_result = finalize_spatialdata(
+        config,
+        slide_id,
+        force=force,
+        dry_run=False,
+        return_sdata=return_sdata,
+    )
+    result = dict(finalize_result)
+    result["stage"] = "assemble"
+    for key in (
+        "image_loader",
+        "full_merge_path",
+        "cell_mask_path",
+        "nuclear_mask_path",
+        "image_aliases",
+        "image_level_keys",
+        "image_level_details",
+        "overlap_diagnostics",
+    ):
+        if key in base_result:
+            result[key] = base_result[key]
+    result["base_stage"] = base_result
+    result["finalize_stage"] = {key: value for key, value in finalize_result.items() if key != "sdata"}
+    return result
 
 
 def build_spatialdata(

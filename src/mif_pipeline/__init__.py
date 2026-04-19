@@ -12,13 +12,20 @@ from .nimbus_runner import finalize_nimbus_multislide, run_nimbus_chunked, run_n
 from .pipeline import run_all
 from .qc import qc_slide
 from .setup import setup_slide, setup_slides
-from .spatialdata_builder import assemble_spatialdata, build_spatialdata, diagnose_label_overlap_instances
+from .spatialdata_builder import (
+    assemble_spatialdata,
+    build_spatialdata,
+    diagnose_label_overlap_instances,
+    finalize_spatialdata,
+    write_spatialdata_base,
+)
 
 __all__ = [
     "crop_channel_images",
     "assemble_spatialdata",
     "build_spatialdata",
     "diagnose_label_overlap_instances",
+    "finalize_spatialdata",
     "finalize_nimbus_multislide",
     "generate_channel_map",
     "load_channel_map",
@@ -31,4 +38,5 @@ __all__ = [
     "run_nimbus_multislide",
     "setup_slide",
     "setup_slides",
+    "write_spatialdata_base",
 ]

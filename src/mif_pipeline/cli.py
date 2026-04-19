@@ -154,7 +154,7 @@ def build_parser() -> argparse.ArgumentParser:
 
     assemble_parser = subparsers.add_parser(
         "assemble-spatialdata",
-        help="Assemble the final SpatialData store from merged image artifacts, masks, and optional Nimbus outputs.",
+        help="Write the canonical SpatialData store, then append aggregation and shapes into that same store.",
     )
     _add_common_arguments(assemble_parser)
 
