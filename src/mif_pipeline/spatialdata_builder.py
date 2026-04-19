@@ -151,6 +151,10 @@ def _derive_shapes(spatialdata_block: dict[str, Any]) -> bool:
     return bool(spatialdata_block.get("derive_shapes", False))
 
 
+def _check_label_overlap(spatialdata_block: dict[str, Any]) -> bool:
+    return bool(spatialdata_block.get("check_label_overlap", True))
+
+
 def _aggregate_run_on_gpu(spatialdata_block: dict[str, Any]) -> bool:
     return bool(spatialdata_block.get("run_on_gpu", False))
 
@@ -257,6 +261,7 @@ def _plan_result(config: dict[str, Any], slide_id: str) -> dict[str, Any]:
     run_on_gpu = _aggregate_run_on_gpu(spatialdata_block)
     dask_scheduler = _cpu_dask_scheduler(spatialdata_block)
     derive_shapes = _derive_shapes(spatialdata_block)
+    check_label_overlap = _check_label_overlap(spatialdata_block)
     planned_labels = ["cell_labels", "nuclear_labels"]
     planned_tables = []
     if aggregate:
@@ -284,6 +289,7 @@ def _plan_result(config: dict[str, Any], slide_id: str) -> dict[str, Any]:
         "run_on_gpu": run_on_gpu,
         "dask_scheduler": dask_scheduler,
         "derive_shapes": derive_shapes,
+        "check_label_overlap": check_label_overlap,
         "planned_labels": planned_labels,
         "planned_shapes": [_shape_name(name) for name in planned_labels] if derive_shapes else [],
         "planned_tables": planned_tables,
@@ -636,6 +642,7 @@ def assemble_spatialdata(
     run_on_gpu = _aggregate_run_on_gpu(spatialdata_block)
     dask_scheduler = _cpu_dask_scheduler(spatialdata_block)
     derive_shapes = _derive_shapes(spatialdata_block)
+    check_label_overlap = _check_label_overlap(spatialdata_block)
     load_nimbus = _load_nimbus(spatialdata_block, slide)
     channel_names = _full_merge_aliases(config, slide_id)
     timings: dict[str, float] = {}
@@ -679,7 +686,8 @@ def assemble_spatialdata(
                 dims=("y", "x"),
             )
             label_arrays["nuclear_labels"] = nuclear_mask
-            overlap_diagnostics = diagnose_label_overlap_instances(cell_mask, nuclear_mask)
+            if check_label_overlap:
+                overlap_diagnostics = diagnose_label_overlap_instances(cell_mask, nuclear_mask)
         step_started = _record_timing(timings, "mask_load_seconds", step_started)
 
         _set_global_identity(full_image, Identity, set_transformation)
@@ -807,6 +815,7 @@ def assemble_spatialdata(
             "run_on_gpu": run_on_gpu,
             "dask_scheduler": dask_scheduler,
             "derive_shapes": derive_shapes,
+            "check_label_overlap": check_label_overlap,
             "load_nimbus": load_nimbus,
             "nimbus_loaded": nimbus_loaded,
             "aggregate_tables": aggregate_tables,

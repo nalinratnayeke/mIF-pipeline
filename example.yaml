@@ -67,6 +67,7 @@ spatialdata:
   run_on_gpu: false
   dask_scheduler: processes
   derive_shapes: false
+  check_label_overlap: true
   load_nimbus: true
   # This stage is intended to run in a modern Harpy + SpatialData environment
   # after merge / InstanSeg / optional Nimbus file artifacts already exist.

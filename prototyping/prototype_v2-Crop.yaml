@@ -68,6 +68,7 @@ spatialdata:
   run_on_gpu: false
   dask_scheduler: processes
   derive_shapes: true
+  check_label_overlap: true
   load_nimbus: true
   # This final assembly stage is intended for a modern Harpy + SpatialData env
   # after merge / InstanSeg / optional Nimbus artifacts already exist.

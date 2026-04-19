@@ -129,6 +129,7 @@ def write_config(tmp_path: Path) -> Path:
                     "aggregate_nuclear_labels": True,
                     "run_on_gpu": False,
                     "derive_shapes": False,
+                    "check_label_overlap": True,
                     "load_nimbus": True,
                 },
             }
@@ -263,6 +264,7 @@ def write_multislide_config(tmp_path: Path, *, mismatch: bool = False) -> Path:
             "aggregate_cell_labels": True,
             "aggregate_nuclear_labels": True,
             "derive_shapes": False,
+            "check_label_overlap": True,
             "load_nimbus": True,
         },
         "slides": {
@@ -1225,6 +1227,7 @@ def test_spatialdata_dry_run_uses_all_channels_by_default(tmp_path: Path):
     assert result["aggregate_cell_labels"] is True
     assert result["aggregate_nuclear_labels"] is True
     assert result["derive_shapes"] is False
+    assert result["check_label_overlap"] is True
     assert result["load_nimbus"] is True
 
 
@@ -1249,6 +1252,16 @@ def test_spatialdata_dry_run_can_toggle_aggregation_targets(tmp_path: Path):
     assert result["planned_tables"] == ["agg_cell_labels", "nimbus_table"]
     assert result["aggregate_cell_labels"] is True
     assert result["aggregate_nuclear_labels"] is False
+
+
+def test_spatialdata_dry_run_can_skip_label_overlap_check(tmp_path: Path):
+    config_path = write_config(tmp_path)
+    config = load_config(config_path)
+    config["slides"]["SLIDE-0272"]["spatialdata"]["check_label_overlap"] = False
+
+    result = build_spatialdata(config, "SLIDE-0272", dry_run=True)
+
+    assert result["check_label_overlap"] is False
 
 
 def test_spatialdata_dry_run_can_plan_derived_shapes(tmp_path: Path):
@@ -1577,6 +1590,25 @@ def test_build_spatialdata_execution_can_skip_missing_nimbus(monkeypatch, tmp_pa
     assert result["nimbus_loaded"] is False
     assert result["tables"] == ["agg_cell_labels", "agg_nuclear_labels"]
     assert "nimbus_table" not in result["sdata"].tables
+
+
+def test_build_spatialdata_execution_can_skip_overlap_diagnostics(monkeypatch, tmp_path: Path):
+    config_path = write_config(tmp_path)
+    config = load_config(config_path)
+    config["slides"]["SLIDE-0272"]["spatialdata"]["check_label_overlap"] = False
+    slide = get_slide_config(config, "SLIDE-0272")
+    paths = spatialdata_builder_module._spatialdata_paths(slide)
+
+    paths["full_merge_path"].write_bytes(b"fake")
+    paths["cell_mask_path"].parent.mkdir(parents=True, exist_ok=True)
+    tf.imwrite(paths["cell_mask_path"], np.array([[0, 1], [2, 2]], dtype=np.uint32))
+    tf.imwrite(paths["nuclear_mask_path"], np.array([[0, 1], [0, 2]], dtype=np.uint32))
+
+    _install_spatialdata_assembly_stubs(monkeypatch)
+    result = build_spatialdata(config, "SLIDE-0272", dry_run=False, return_sdata=True)
+
+    assert result["check_label_overlap"] is False
+    assert result["overlap_diagnostics"] is None
 
 
 def test_diagnose_label_overlap_instances_reports_mismatched_ids():
