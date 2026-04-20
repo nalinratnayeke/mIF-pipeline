@@ -359,7 +359,11 @@ for stage_name in "${STAGES[@]}"; do
   case "${stage_name}" in
     setup|merge|instanseg|spatialdata|qc)
       for slide_id in "${SLIDE_IDS[@]}"; do
-        stage_args=("${stage_name}" "${COMMON_ARGS[@]}" --slide "${slide_id}")
+        cli_stage="${stage_name}"
+        if [[ "${stage_name}" == "spatialdata" ]]; then
+          cli_stage="assemble-spatialdata"
+        fi
+        stage_args=("${cli_stage}" "${COMMON_ARGS[@]}" --slide "${slide_id}")
         if [[ "${stage_name}" == "qc" ]]; then
           stage_args=("${stage_name}" --config "${CONFIG}" --slide "${slide_id}")
         fi
