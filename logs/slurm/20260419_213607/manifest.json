@@ -1,0 +1,39 @@
+{
+  "config": "/home/ratnayn/codex/mIF-pipeline/prototyping/prototype_v2-Crop.yaml",
+  "batch_dir": "/home/ratnayn/codex/mIF-pipeline/logs/slurm/20260419_213607",
+  "plan_only": true,
+  "slides": [
+    "SLIDE-0329_crop_2048",
+    "SLIDE-0329_crop_2048_2"
+  ],
+  "stages": [
+    "nimbus",
+    "spatialdata",
+    "qc"
+  ],
+  "resources": {
+    "partition": null,
+    "cpus": 8,
+    "mem": "64G",
+    "time": "24:00:00",
+    "gpus": 0
+  },
+  "jobs": [
+    {
+      "slide_id": "SLIDE-0329_crop_2048",
+      "job_id": null,
+      "stdout": "/home/ratnayn/codex/mIF-pipeline/logs/slurm/20260419_213607/SLIDE-0329_crop_2048.out",
+      "stderr": "/home/ratnayn/codex/mIF-pipeline/logs/slurm/20260419_213607/SLIDE-0329_crop_2048.err",
+      "command": "bash /home/ratnayn/codex/mIF-pipeline/scripts/run_pipeline.sh --config prototyping/prototype_v2-Crop.yaml --stage nimbus --stage spatialdata --stage qc --slide SLIDE-0329_crop_2048",
+      "status": "planned"
+    },
+    {
+      "slide_id": "SLIDE-0329_crop_2048_2",
+      "job_id": null,
+      "stdout": "/home/ratnayn/codex/mIF-pipeline/logs/slurm/20260419_213607/SLIDE-0329_crop_2048_2.out",
+      "stderr": "/home/ratnayn/codex/mIF-pipeline/logs/slurm/20260419_213607/SLIDE-0329_crop_2048_2.err",
+      "command": "bash /home/ratnayn/codex/mIF-pipeline/scripts/run_pipeline.sh --config prototyping/prototype_v2-Crop.yaml --stage nimbus --stage spatialdata --stage qc --slide SLIDE-0329_crop_2048_2",
+      "status": "planned"
+    }
+  ]
+}

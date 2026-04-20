@@ -41,11 +41,23 @@ def load_config(config_path: Union[str, Path]) -> dict[str, Any]:
             "Legacy 'seg_merge' config is no longer supported. "
             "Keep only 'full_merge' and move the segmentation channel list to 'instanseg.channels'."
         )
+    if isinstance(config.get("nimbus"), dict) and "multislide" in config["nimbus"]:
+        raise ValueError(
+            "Legacy 'nimbus.multislide' config is no longer supported. "
+            "Use slide-local 'nimbus.output_dir' only, run 'nimbus-prepare' across the selected slide set, "
+            "and let each slide job run 'nimbus' independently."
+        )
     for slide_id, slide in config["slides"].items():
         if isinstance(slide, dict) and "seg_merge" in slide:
             raise ValueError(
                 f"Slide {slide_id} uses legacy 'seg_merge' config. "
                 "Keep only 'full_merge' and move the segmentation channel list to 'instanseg.channels'."
+            )
+        if isinstance(slide, dict) and isinstance(slide.get("nimbus"), dict) and "multislide" in slide["nimbus"]:
+            raise ValueError(
+                f"Slide {slide_id} uses legacy 'nimbus.multislide' config. "
+                "Use slide-local 'nimbus.output_dir' only, run 'nimbus-prepare' across the selected slide set, "
+                "and let each slide job run 'nimbus' independently."
             )
 
     config["_meta"] = {
@@ -479,89 +491,6 @@ def resolve_nimbus_inputs(config: dict[str, Any], slide_id: str) -> dict[str, An
         "raw_paths": [str(entry["path"]) for entry in entries],
         "fov_paths": [slide["slide_dir"]],
         "aliases": [entry["alias"] for entry in entries],
-    }
-
-
-def resolve_nimbus_multislide_inputs(
-    config: dict[str, Any],
-    slide_ids: Optional[Iterable[str]] = None,
-) -> dict[str, Any]:
-    """Resolve Nimbus inputs across multiple slides for one combined run."""
-    config = ensure_config(config)
-    requested_slide_ids = [str(slide_id) for slide_id in slide_ids] if slide_ids is not None else None
-
-    top_level_nimbus = config.get("nimbus") or {}
-    multislide_block = top_level_nimbus.get("multislide") or {}
-    configured_slide_ids = multislide_block.get("slide_ids")
-    if requested_slide_ids is None:
-        if configured_slide_ids is not None:
-            requested_slide_ids = [str(slide_id) for slide_id in configured_slide_ids]
-        else:
-            requested_slide_ids = list(config["slides"].keys())
-    if not requested_slide_ids:
-        raise ValueError("Nimbus multislide execution requires at least one slide.")
-
-    resolved_slides = [get_slide_config(config, slide_id) for slide_id in requested_slide_ids]
-    entries_by_slide = {
-        slide["slide_id"]: resolve_nimbus_channel_entries(config, slide["slide_id"])
-        for slide in resolved_slides
-    }
-
-    reference_slide_id = requested_slide_ids[0]
-    reference_entries = entries_by_slide[reference_slide_id]
-    reference_aliases = [entry["alias"] for entry in reference_entries]
-    for slide_id in requested_slide_ids[1:]:
-        slide_entries = entries_by_slide[slide_id]
-        slide_aliases = [entry["alias"] for entry in slide_entries]
-        if slide_aliases != reference_aliases:
-            raise ValueError(
-                f"Nimbus multislide execution requires identical alias selection across slides. "
-                f"Reference slide {reference_slide_id}: {reference_aliases}; "
-                f"slide {slide_id}: {slide_aliases}."
-            )
-
-    fov_paths: list[str] = []
-    raw_paths_by_slide: dict[str, list[str]] = {}
-    source_names_by_slide: dict[str, dict[str, str]] = {}
-    fov_to_slide: dict[str, str] = {}
-    basename_to_slide: dict[str, str] = {}
-    for slide in resolved_slides:
-        slide_id = slide["slide_id"]
-        slide_fov_paths = [slide["slide_dir"]]
-        raw_paths_by_slide[slide_id] = [str(entry["path"]) for entry in entries_by_slide[slide_id]]
-        source_names_by_slide[slide_id] = {
-            str(entry["alias"]): canonical_nimbus_name(entry)
-            for entry in entries_by_slide[slide_id]
-        }
-        for fov_path in slide_fov_paths:
-            normalized = str(Path(fov_path).resolve())
-            fov_name = Path(fov_path).name
-            prior_slide = basename_to_slide.get(fov_name)
-            if prior_slide is not None and prior_slide != slide_id:
-                raise ValueError(
-                    f"Nimbus multislide execution requires unique FOV basenames across slides. "
-                    f"FOV basename {fov_name!r} appears in both {prior_slide} and {slide_id}."
-                )
-            basename_to_slide[fov_name] = slide_id
-            fov_paths.append(normalized)
-            fov_to_slide[normalized] = slide_id
-
-    multislide_enabled = bool(multislide_block.get("enabled", False))
-    output_dir_value = multislide_block.get("output_dir") if multislide_enabled else None
-    output_dir = str(resolve_path(output_dir_value, config["_meta"]["config_dir"])) if output_dir_value else None
-    per_slide_output_dirname = str(multislide_block.get("per_slide_output_dirname", "per_slide"))
-
-    return {
-        "slide_ids": requested_slide_ids,
-        "aliases": list(reference_aliases),
-        "nimbus_channels": list(reference_aliases),
-        "fov_paths": fov_paths,
-        "fov_to_slide": fov_to_slide,
-        "fov_name_to_slide": basename_to_slide,
-        "raw_paths_by_slide": raw_paths_by_slide,
-        "source_names_by_slide": source_names_by_slide,
-        "output_dir": output_dir,
-        "per_slide_output_dirname": per_slide_output_dirname,
     }
 
 

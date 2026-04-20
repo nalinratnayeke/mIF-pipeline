@@ -112,10 +112,6 @@ def _mask_paths(slide: dict[str, Any]) -> tuple[Path, Path]:
 
 def _nimbus_table_path(slide: dict[str, Any]) -> Path:
     nimbus = slide.get("nimbus") or {}
-    multislide = nimbus.get("multislide") or {}
-    if multislide.get("enabled", False):
-        per_slide_dirname = str(multislide.get("per_slide_output_dirname", "per_slide"))
-        return Path(multislide["output_dir"]) / per_slide_dirname / slide["slide_id"] / "cell_table_full.csv"
     return Path(nimbus["output_dir"]) / "cell_table_full.csv"
 
 

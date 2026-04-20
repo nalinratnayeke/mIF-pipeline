@@ -17,7 +17,6 @@ from mif_pipeline.config import (
     resolve_channel_entries,
     resolve_nimbus_channel_entries,
     resolve_nimbus_inputs,
-    resolve_nimbus_multislide_inputs,
 )
 from mif_pipeline.merge_ometiff import (
     _downsample2x_mean,
@@ -28,10 +27,9 @@ from mif_pipeline.merge_ometiff import (
 from mif_pipeline.crop import crop_channel_images
 import mif_pipeline.instanseg_runner as instanseg_runner_module
 from mif_pipeline.nimbus_runner import (
-    finalize_nimbus_multislide,
     merge_chunk_tables,
+    prepare_nimbus_normalization,
     run_nimbus_chunked,
-    run_nimbus_multislide,
 )
 from mif_pipeline.pipeline import run_all
 from mif_pipeline.setup import setup_slide, setup_slides
@@ -115,11 +113,6 @@ def write_config(tmp_path: Path) -> Path:
                     "n_subset": 50,
                     "clip_values": [0, 2],
                     "multiprocessing": False,
-                    "multislide": {
-                        "enabled": True,
-                        "output_dir": str(tmp_path / "work" / "nimbus_multislide"),
-                        "per_slide_output_dirname": "per_slide",
-                    },
                 },
                 "spatialdata": {
                     "enabled": True,
@@ -251,11 +244,6 @@ def write_multislide_config(tmp_path: Path, *, mismatch: bool = False) -> Path:
             "n_subset": 50,
             "clip_values": [0, 2],
             "multiprocessing": False,
-            "multislide": {
-                "enabled": True,
-                "output_dir": str(tmp_path / "work" / "nimbus_multislide"),
-                "per_slide_output_dirname": "per_slide",
-            },
         },
         "spatialdata": {
             "enabled": True,
@@ -745,36 +733,34 @@ def test_resolve_nimbus_inputs_returns_single_slide_fov_root(tmp_path: Path):
     assert resolved_inputs["fov_paths"] == [str(tmp_path / "images" / "SLIDE-0272")]
 
 
-def test_resolve_nimbus_multislide_inputs(tmp_path: Path):
-    config_path = write_multislide_config(tmp_path)
-    config = load_config(config_path)
-
-    resolved = resolve_nimbus_multislide_inputs(config, ["SLIDE-A", "SLIDE-B"])
-
-    assert resolved["slide_ids"] == ["SLIDE-A", "SLIDE-B"]
-    assert resolved["aliases"] == ["R0_DAPI", "R0_PANCK"]
-    assert resolved["nimbus_channels"] == ["R0_DAPI", "R0_PANCK"]
-    assert resolved["fov_paths"] == [
-        str((tmp_path / "image_data" / "SLIDE-A").resolve()),
-        str((tmp_path / "image_data" / "SLIDE-B").resolve()),
-    ]
-    assert resolved["fov_name_to_slide"] == {"SLIDE-A": "SLIDE-A", "SLIDE-B": "SLIDE-B"}
-    assert resolved["output_dir"] == str((tmp_path / "work" / "nimbus_multislide").resolve())
-    assert resolved["source_names_by_slide"]["SLIDE-A"]["R0_DAPI"] == "SLIDE-A_0.0.2_R000_DAPI_F_Tiled"
-
-
-def test_resolve_nimbus_multislide_inputs_requires_unique_fov_basenames(tmp_path: Path):
-    config_path = write_multislide_config(tmp_path)
-    config = load_config(config_path)
-    config["slides"]["SLIDE-B"]["slide_dir"] = str(tmp_path / "different_parent" / "SLIDE-A")
-    Path(config["slides"]["SLIDE-B"]["slide_dir"]).mkdir(parents=True)
+def test_load_config_rejects_legacy_nimbus_multislide(tmp_path: Path):
+    config_path = tmp_path / "legacy_nimbus.yaml"
+    config_path.write_text(
+        yaml.safe_dump(
+            {
+                "nimbus": {
+                    "multislide": {
+                        "enabled": True,
+                    }
+                },
+                "slides": {
+                    "SLIDE-1": {
+                        "slide_dir": str(tmp_path / "input"),
+                        "output_dir": str(tmp_path / "output"),
+                        "channel_map_file": "channel_map.json",
+                    }
+                },
+            }
+        ),
+        encoding="utf-8",
+    )
 
     try:
-        resolve_nimbus_multislide_inputs(config, ["SLIDE-A", "SLIDE-B"])
+        load_config(config_path)
     except ValueError as exc:
-        assert "unique FOV basenames" in str(exc)
+        assert "Legacy 'nimbus.multislide' config is no longer supported" in str(exc)
     else:
-        raise AssertionError("Expected duplicate FOV basenames to raise ValueError.")
+        raise AssertionError("Expected legacy nimbus.multislide configs to raise ValueError.")
 
 
 def test_setup_slides_generates_all_matching_channel_maps(tmp_path: Path):
@@ -888,74 +874,127 @@ def test_nimbus_chunk_dry_run(tmp_path: Path):
 
     assert result["chunk_count"] == 2
     assert result["selected_chunk_indices"] == [1]
-    assert result["complete_chunk_selection"] is False
     assert result["chunks"][0]["chunk_index"] == 1
     assert result["chunks"][0]["nimbus_channels"] == ["R0_PANCK"]
-    assert result["fov_paths"] == [str(tmp_path / "images" / "SLIDE-0272")]
-
-
-def test_nimbus_chunk_dry_run_uses_slide_output_dir_when_multislide_disabled(tmp_path: Path):
-    config_path = write_config(tmp_path)
-    config = load_config(config_path)
-    config["slides"]["SLIDE-0272"]["nimbus"]["multislide"]["enabled"] = False
-
-    result = run_nimbus_chunked(config, "SLIDE-0272", dry_run=True)
-
+    assert result["full_merge_path"] == str(tmp_path / "work" / "SLIDE-0272" / "SLIDE-0272_full.ome.tif")
     assert result["output_dir"] == str(tmp_path / "work" / "SLIDE-0272" / "nimbus")
-    assert result["per_slide_output_dir"] == str(tmp_path / "work" / "SLIDE-0272" / "nimbus" / "per_slide")
+    assert result["chunks"][0]["normalization_dict_path"].endswith("chunk_001/normalization_dict.json")
 
 
-def test_nimbus_multislide_dry_run(tmp_path: Path):
+def test_prepare_nimbus_normalization_dry_run(tmp_path: Path):
     config_path = write_multislide_config(tmp_path)
     config = load_config(config_path)
 
-    result = run_nimbus_multislide(config, ["SLIDE-A", "SLIDE-B"], chunk_indices=[1], dry_run=True)
+    result = prepare_nimbus_normalization(config, ["SLIDE-A", "SLIDE-B"], chunk_indices=[1], dry_run=True)
 
     assert result["status"] == "planned"
     assert result["slide_ids"] == ["SLIDE-A", "SLIDE-B"]
-    assert result["join_keys"] == ["slide_id", "fov", "cell_id"]
     assert result["selected_chunk_indices"] == [1]
-    assert result["complete_chunk_selection"] is False
-    assert result["chunks"][0]["nimbus_channels"] == ["R0_PANCK"]
-    assert "per_slide_tables" not in result
-    assert result["staged_fov_paths"][0].endswith("_multislide_fovs/SLIDE-A")
+    assert result["chunks"][0]["aliases"] == ["R0_PANCK"]
+    assert result["chunks"][0]["normalization_dict_paths"]["SLIDE-A"].endswith(
+        "work/SLIDE-A/nimbus/chunk_001/normalization_dict.json"
+    )
 
 
-def test_run_nimbus_chunked_uses_multislide_engine(tmp_path: Path, monkeypatch):
-    config_path = write_config(tmp_path)
-    config = load_config(config_path)
-
-    captured = {}
-
-    def fake_run_nimbus_multislide(config_arg, slide_ids, *, chunk_indices=None, force=False, dry_run=False):
-        captured["slide_ids"] = list(slide_ids)
-        captured["chunk_indices"] = chunk_indices
-        captured["force"] = force
-        captured["dry_run"] = dry_run
-        return {"status": "planned", "slide_ids": list(slide_ids), "chunks": [], "merged_csv": "x.csv"}
-
-    monkeypatch.setattr("mif_pipeline.nimbus_runner.run_nimbus_multislide", fake_run_nimbus_multislide)
-
-    result = run_nimbus_chunked(config, "SLIDE-0272", chunk_indices=[0], dry_run=True)
-
-    assert captured == {"slide_ids": ["SLIDE-0272"], "chunk_indices": [0], "force": False, "dry_run": True}
-    assert result["slide_id"] == "SLIDE-0272"
-    assert result["status"] == "planned"
-
-
-def test_nimbus_multislide_execution_with_stubs(tmp_path: Path, monkeypatch):
-    import pandas as pd
-
+def test_prepare_nimbus_normalization_writes_slide_local_jsons(tmp_path: Path, monkeypatch):
     config_path = write_multislide_config(tmp_path)
     config = load_config(config_path)
+    calls: list[dict[str, Any]] = []
 
+    class DummyDataset:
+        def __init__(self, *, fov_paths, suffix, include_channels, output_dir, **kwargs):
+            self.fov_paths = list(fov_paths)
+            self.suffix = suffix
+            self.include_channels = list(include_channels)
+            self.output_dir = output_dir
+            calls.append(
+                {
+                    "fov_paths": list(fov_paths),
+                    "suffix": suffix,
+                    "include_channels": list(include_channels),
+                    "output_dir": output_dir,
+                }
+            )
+
+        def prepare_normalization_dict(self, **kwargs):
+            Path(self.output_dir).mkdir(parents=True, exist_ok=True)
+            (Path(self.output_dir) / "normalization_dict.json").write_text(
+                json.dumps({channel: float(index + 1) for index, channel in enumerate(self.include_channels)}),
+                encoding="utf-8",
+            )
+
+    class DummyNimbus:
+        pass
+
+    monkeypatch.setattr("mif_pipeline.nimbus_runner._import_nimbus", lambda: (DummyNimbus, DummyDataset))
+
+    result = prepare_nimbus_normalization(config, ["SLIDE-A", "SLIDE-B"], force=True)
+
+    assert result["status"] == "written"
+    assert len(calls) == 2
+    assert calls[0]["include_channels"] == ["R0_DAPI"]
+    assert calls[1]["include_channels"] == ["R0_PANCK"]
+    assert len(calls[0]["fov_paths"]) == 2
     for slide_id in ("SLIDE-A", "SLIDE-B"):
-        slide = get_slide_config(config, slide_id)
-        mask_dir = Path(slide["mask_export"]["mask_dir"])
-        mask_dir.mkdir(parents=True, exist_ok=True)
-        tf.imwrite(mask_dir / f"{slide_id}_whole_cell.tiff", np.array([[0, 1], [1, 2]], dtype=np.uint32))
+        assert (
+            tmp_path / "work" / slide_id / "nimbus" / "chunk_000" / "normalization_dict.json"
+        ).exists()
+        assert (
+            tmp_path / "work" / slide_id / "nimbus" / "chunk_001" / "normalization_dict.json"
+        ).exists()
 
-    calls = {"datasets": [], "normalization": 0, "predict": 0}
+
+def test_prepare_nimbus_normalization_reuses_existing_jsons(tmp_path: Path, monkeypatch):
+    config_path = write_multislide_config(tmp_path)
+    config = load_config(config_path)
+    for slide_id in ("SLIDE-A", "SLIDE-B"):
+        chunk_dir = tmp_path / "work" / slide_id / "nimbus" / "chunk_000"
+        chunk_dir.mkdir(parents=True, exist_ok=True)
+        (chunk_dir / "normalization_dict.json").write_text('{"R0_DAPI": 1.0}', encoding="utf-8")
+
+    def fail_import():
+        raise AssertionError("Expected existing normalization JSONs to be reused without invoking Nimbus.")
+
+    monkeypatch.setattr("mif_pipeline.nimbus_runner._import_nimbus", fail_import)
+
+    result = prepare_nimbus_normalization(config, ["SLIDE-A", "SLIDE-B"], chunk_indices=[0], force=False)
+
+    assert result["status"] == "reused"
+    assert result["chunks"][0]["status"] == "reused"
+
+
+def test_prepare_nimbus_normalization_requires_identical_aliases(tmp_path: Path):
+    config_path = write_multislide_config(tmp_path, mismatch=True)
+    config = load_config(config_path)
+
+    try:
+        prepare_nimbus_normalization(config, ["SLIDE-A", "SLIDE-B"], dry_run=True)
+    except ValueError as exc:
+        assert "identical alias selection across slides" in str(exc)
+    else:
+        raise AssertionError("Expected mismatched Nimbus aliases to raise ValueError.")
+
+
+def test_run_nimbus_chunked_execution_with_stubs(tmp_path: Path, monkeypatch):
+    import pandas as pd
+
+    config_path = write_config(tmp_path)
+    config = load_config(config_path)
+    slide = get_slide_config(config, "SLIDE-0272")
+    tf.imwrite(
+        Path(slide["full_merge"]["ome_path"]),
+        np.zeros((2, 8, 8), dtype=np.uint16),
+        metadata={"axes": "CYX"},
+    )
+    mask_dir = Path(slide["mask_export"]["mask_dir"])
+    mask_dir.mkdir(parents=True, exist_ok=True)
+    tf.imwrite(mask_dir / "SLIDE-0272_whole_cell.tiff", np.array([[0, 1], [1, 2]], dtype=np.uint32))
+    for chunk_index in (0, 1):
+        chunk_dir = Path(slide["nimbus"]["output_dir"]) / f"chunk_{chunk_index:03d}"
+        chunk_dir.mkdir(parents=True, exist_ok=True)
+        (chunk_dir / "normalization_dict.json").write_text("{}", encoding="utf-8")
+
+    calls = {"datasets": [], "normalization": [], "predict": 0}
 
     class DummyDataset:
         def __init__(self, *, fov_paths, suffix, include_channels, segmentation_naming_convention, output_dir, **kwargs):
@@ -969,11 +1008,12 @@ def test_nimbus_multislide_execution_with_stubs(tmp_path: Path, monkeypatch):
                     "fov_paths": list(fov_paths),
                     "suffix": suffix,
                     "include_channels": list(include_channels),
+                    "mask_path": segmentation_naming_convention("ignored"),
                 }
             )
 
         def prepare_normalization_dict(self, **kwargs):
-            calls["normalization"] += 1
+            calls["normalization"].append(kwargs)
 
     class DummyNimbus:
         def __init__(self, dataset, output_dir, **kwargs):
@@ -987,42 +1027,45 @@ def test_nimbus_multislide_execution_with_stubs(tmp_path: Path, monkeypatch):
             calls["predict"] += 1
             return pd.DataFrame(
                 {
-                    "fov": ["SLIDE-A", "SLIDE-B"],
-                    "label": [1, 2],
-                    self.dataset.include_channels[0]: [0.1, 0.2],
+                    "fov": ["SLIDE-0272_full"],
+                    "label": [1],
+                    self.dataset.include_channels[0]: [0.1],
                 }
             )
 
     monkeypatch.setattr("mif_pipeline.nimbus_runner._import_nimbus", lambda: (DummyNimbus, DummyDataset))
 
-    result = run_nimbus_multislide(config, ["SLIDE-A", "SLIDE-B"], force=True)
+    result = run_nimbus_chunked(config, "SLIDE-0272", force=False)
 
     assert result["status"] == "written"
     assert result["finalized"] is True
-    assert result["merged_row_count"] == 2
-    assert result["join_keys"] == ["slide_id", "fov", "cell_id"]
-    assert set(result["per_slide_tables"]) == {"SLIDE-A", "SLIDE-B"}
-    assert calls["normalization"] == 2
+    assert result["merged_row_count"] == 1
+    assert result["join_keys"] == ["fov", "cell_id"]
+    assert len(calls["normalization"]) == 2
     assert calls["predict"] == 2
-    assert calls["datasets"][0]["fov_paths"] == result["staged_fov_paths"]
+    assert calls["datasets"][0]["fov_paths"] == [str(Path(slide["full_merge"]["ome_path"]))]
     assert calls["datasets"][0]["include_channels"] == ["R0_DAPI"]
+    assert calls["datasets"][0]["mask_path"].endswith("SLIDE-0272_whole_cell.tiff")
     assert Path(result["merged_csv"]).exists()
     merged = pd.read_csv(result["merged_csv"])
-    assert list(merged.columns) == ["slide_id", "fov", "cell_id", "R0_DAPI", "R0_PANCK"]
-    assert set(merged["slide_id"]) == {"SLIDE-A", "SLIDE-B"}
+    assert list(merged.columns) == ["fov", "cell_id", "R0_DAPI", "R0_PANCK"]
+    assert merged.iloc[0]["cell_id"] == 1
 
 
-def test_nimbus_multislide_partial_chunk_execution_with_stubs(tmp_path: Path, monkeypatch):
+def test_run_nimbus_chunked_partial_chunk_execution_with_stubs(tmp_path: Path, monkeypatch):
     import pandas as pd
 
-    config_path = write_multislide_config(tmp_path)
+    config_path = write_config(tmp_path)
     config = load_config(config_path)
-
-    for slide_id in ("SLIDE-A", "SLIDE-B"):
-        slide = get_slide_config(config, slide_id)
-        mask_dir = Path(slide["mask_export"]["mask_dir"])
-        mask_dir.mkdir(parents=True, exist_ok=True)
-        tf.imwrite(mask_dir / f"{slide_id}_whole_cell.tiff", np.array([[0, 1], [1, 2]], dtype=np.uint32))
+    slide = get_slide_config(config, "SLIDE-0272")
+    tf.imwrite(
+        Path(slide["full_merge"]["ome_path"]),
+        np.zeros((2, 8, 8), dtype=np.uint16),
+        metadata={"axes": "CYX"},
+    )
+    mask_dir = Path(slide["mask_export"]["mask_dir"])
+    mask_dir.mkdir(parents=True, exist_ok=True)
+    tf.imwrite(mask_dir / "SLIDE-0272_whole_cell.tiff", np.array([[0, 1], [1, 2]], dtype=np.uint32))
 
     class DummyDataset:
         def __init__(self, *, fov_paths, suffix, include_channels, segmentation_naming_convention, output_dir, **kwargs):
@@ -1041,73 +1084,21 @@ def test_nimbus_multislide_partial_chunk_execution_with_stubs(tmp_path: Path, mo
         def predict_fovs(self):
             return pd.DataFrame(
                 {
-                    "fov": ["SLIDE-A", "SLIDE-B"],
-                    "label": [1, 2],
-                    self.dataset.include_channels[0]: [0.1, 0.2],
+                    "fov": ["SLIDE-0272_full"],
+                    "label": [1],
+                    self.dataset.include_channels[0]: [0.1],
                 }
             )
 
     monkeypatch.setattr("mif_pipeline.nimbus_runner._import_nimbus", lambda: (DummyNimbus, DummyDataset))
 
-    result = run_nimbus_multislide(config, ["SLIDE-A", "SLIDE-B"], chunk_indices=[0], force=True)
+    result = run_nimbus_chunked(config, "SLIDE-0272", chunk_indices=[0], force=True)
 
     assert result["status"] == "partial"
     assert result["finalized"] is False
     assert result["selected_chunk_indices"] == [0]
     assert Path(result["chunks"][0]["cell_table_csv"]).exists()
     assert not Path(result["merged_csv"]).exists()
-
-
-def test_finalize_nimbus_multislide_merges_existing_chunk_outputs(tmp_path: Path):
-    import pandas as pd
-
-    config_path = write_multislide_config(tmp_path)
-    config = load_config(config_path)
-    resolved = resolve_nimbus_multislide_inputs(config, ["SLIDE-A", "SLIDE-B"])
-    output_dir = Path(resolved["output_dir"])
-    (output_dir / "chunk_000").mkdir(parents=True, exist_ok=True)
-    (output_dir / "chunk_001").mkdir(parents=True, exist_ok=True)
-
-    pd.DataFrame(
-        {
-            "slide_id": ["SLIDE-A", "SLIDE-B"],
-            "fov": ["SLIDE-A", "SLIDE-B"],
-            "cell_id": [1, 2],
-            "R0_DAPI": [0.1, 0.2],
-        }
-    ).to_csv(output_dir / "chunk_000" / "nimbus_cell_table.csv", index=False)
-    pd.DataFrame(
-        {
-            "slide_id": ["SLIDE-A", "SLIDE-B"],
-            "fov": ["SLIDE-A", "SLIDE-B"],
-            "cell_id": [1, 2],
-            "R0_PANCK": [0.3, 0.4],
-        }
-    ).to_csv(output_dir / "chunk_001" / "nimbus_cell_table.csv", index=False)
-
-    result = finalize_nimbus_multislide(config, ["SLIDE-A", "SLIDE-B"])
-
-    assert result["status"] == "written"
-    assert Path(result["merged_csv"]).exists()
-    assert set(result["per_slide_tables"]) == {"SLIDE-A", "SLIDE-B"}
-    merged = pd.read_csv(result["merged_csv"])
-    assert list(merged.columns) == ["slide_id", "fov", "cell_id", "R0_DAPI", "R0_PANCK"]
-
-
-def test_finalize_nimbus_multislide_requires_all_chunk_outputs(tmp_path: Path):
-    config_path = write_multislide_config(tmp_path)
-    config = load_config(config_path)
-    resolved = resolve_nimbus_multislide_inputs(config, ["SLIDE-A", "SLIDE-B"])
-    output_dir = Path(resolved["output_dir"])
-    (output_dir / "chunk_000").mkdir(parents=True, exist_ok=True)
-    (output_dir / "chunk_000" / "nimbus_cell_table.csv").write_text("slide_id,fov,cell_id,R0_DAPI\n", encoding="utf-8")
-
-    try:
-        finalize_nimbus_multislide(config, ["SLIDE-A", "SLIDE-B"])
-    except FileNotFoundError as exc:
-        assert "missing" in str(exc)
-    else:
-        raise AssertionError("Expected finalize_nimbus_multislide to fail when chunk CSVs are missing.")
 
 
 def test_nimbus_can_exclude_channels(tmp_path: Path):
@@ -1221,21 +1212,14 @@ def test_get_slide_config_rejects_legacy_spatialdata_base_store_settings(tmp_pat
         raise AssertionError("Expected legacy base-store settings to raise ValueError.")
 
 
-def test_spatialdata_prefers_multislide_per_slide_nimbus_table_path(tmp_path: Path):
+def test_spatialdata_uses_slide_local_nimbus_table_path(tmp_path: Path):
     config_path = write_config(tmp_path)
     config = load_config(config_path)
     slide = get_slide_config(config, "SLIDE-0272")
 
     paths = spatialdata_builder_module._spatialdata_paths(slide)
 
-    assert paths["nimbus_table_path"] == (
-        tmp_path
-        / "work"
-        / "nimbus_multislide"
-        / "per_slide"
-        / "SLIDE-0272"
-        / "cell_table_full.csv"
-    )
+    assert paths["nimbus_table_path"] == tmp_path / "work" / "SLIDE-0272" / "nimbus" / "cell_table_full.csv"
 
 
 def test_spatialdata_dry_run_uses_all_channels_by_default(tmp_path: Path):

@@ -40,6 +40,8 @@ mask_export:
 nimbus:
   enabled: true
   output_dir: nimbus
+  # Prepare shared normalization interactively with `mif-pipeline nimbus-prepare`
+  # across the selected slide set, then run each slide job independently.
   # Use either channels or exclude_channels. Aliases should match
   # setup-generated channel_map aliases.
   channels: [R1_DAPI, R4_GFP_POLY_AF488, R4_P19_POLYRAT, R4_ANXA10_647, R4_LGALS4_750]
@@ -53,11 +55,6 @@ nimbus:
   n_subset: 50
   clip_values: [0, 2]
   multiprocessing: true
-  multislide:
-    enabled: false
-    output_dir: /data1/lowes/ratnayn/Data/CellDive_analysis_data/pipeline_prototype/nimbus_multislide_SLIDE-0329
-    per_slide_output_dirname: per_slide
-    slide_ids: [SLIDE-0329]
 
 spatialdata:
   enabled: true

@@ -8,7 +8,7 @@ from .config import (
 from .crop import crop_channel_images
 from .instanseg_runner import run_instanseg
 from .merge_ometiff import merge_slide_ometiffs
-from .nimbus_runner import finalize_nimbus_multislide, run_nimbus_chunked, run_nimbus_multislide
+from .nimbus_runner import prepare_nimbus_normalization, run_nimbus_chunked
 from .pipeline import run_all
 from .qc import qc_slide
 from .setup import setup_slide, setup_slides
@@ -26,16 +26,15 @@ __all__ = [
     "build_spatialdata",
     "diagnose_label_overlap_instances",
     "finalize_spatialdata",
-    "finalize_nimbus_multislide",
     "generate_channel_map",
     "load_channel_map",
     "load_config",
     "merge_slide_ometiffs",
+    "prepare_nimbus_normalization",
     "qc_slide",
     "run_all",
     "run_instanseg",
     "run_nimbus_chunked",
-    "run_nimbus_multislide",
     "setup_slide",
     "setup_slides",
     "write_spatialdata_base",

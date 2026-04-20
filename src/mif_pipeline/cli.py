@@ -5,10 +5,10 @@ import json
 from pathlib import Path
 from typing import Any, Callable, Optional
 
-from .config import get_slide_config, load_config
+from .config import load_config
 from .instanseg_runner import run_instanseg
 from .merge_ometiff import merge_slide_ometiffs
-from .nimbus_runner import finalize_nimbus_multislide, run_nimbus_chunked, run_nimbus_multislide
+from .nimbus_runner import prepare_nimbus_normalization, run_nimbus_chunked
 from .pipeline import run_all
 from .qc import qc_slide
 from .setup import setup_slide, setup_slides
@@ -98,58 +98,40 @@ def build_parser() -> argparse.ArgumentParser:
         help="Comma-separated chunk indices. Can be combined with repeated --chunk.",
     )
 
-    nimbus_multislide_parser = subparsers.add_parser(
-        "nimbus-multislide",
-        help="Run Nimbus once over multiple slides with shared normalization.",
+    nimbus_prepare_parser = subparsers.add_parser(
+        "nimbus-prepare",
+        help="Prepare shared Nimbus normalization JSONs and copy them into slide-local chunk folders.",
     )
-    nimbus_multislide_parser.add_argument("--config", required=True, help="Path to the pipeline YAML config.")
-    nimbus_multislide_parser.add_argument(
+    nimbus_prepare_parser.add_argument("--config", required=True, help="Path to the pipeline YAML config.")
+    nimbus_prepare_parser.add_argument(
         "--slide",
         dest="slide_ids",
         action="append",
-        help="Include a slide ID. Repeat to target multiple slides.",
+        help="Include a slide ID. Repeat to target multiple slides. Omit to use all configured slides.",
     )
-    nimbus_multislide_parser.add_argument(
+    nimbus_prepare_parser.add_argument(
         "--slides",
         dest="slides_csv",
         action="append",
         help="Comma-separated slide IDs. Can be combined with repeated --slide.",
     )
-    nimbus_multislide_parser.add_argument(
+    nimbus_prepare_parser.add_argument(
         "--force",
         action="store_true",
         help="Overwrite existing outputs where supported.",
     )
-    nimbus_multislide_parser.add_argument(
+    nimbus_prepare_parser.add_argument(
         "--chunk",
         dest="chunk_indices",
         action="append",
         type=int,
-        help="Run only the specified chunk index. Repeat to select multiple chunks.",
+        help="Prepare only the specified chunk index. Repeat to select multiple chunks.",
     )
-    nimbus_multislide_parser.add_argument(
+    nimbus_prepare_parser.add_argument(
         "--chunks",
         dest="chunks_csv",
         action="append",
         help="Comma-separated chunk indices. Can be combined with repeated --chunk.",
-    )
-
-    nimbus_finalize_parser = subparsers.add_parser(
-        "nimbus-finalize",
-        help="Finalize multislide Nimbus outputs by merging completed chunk tables.",
-    )
-    nimbus_finalize_parser.add_argument("--config", required=True, help="Path to the pipeline YAML config.")
-    nimbus_finalize_parser.add_argument(
-        "--slide",
-        dest="slide_ids",
-        action="append",
-        help="Include a slide ID. Repeat to target multiple slides.",
-    )
-    nimbus_finalize_parser.add_argument(
-        "--slides",
-        dest="slides_csv",
-        action="append",
-        help="Comma-separated slide IDs. Can be combined with repeated --slide.",
     )
 
     assemble_parser = subparsers.add_parser(
@@ -187,13 +169,12 @@ def main(argv: Optional[list[str]] = None) -> int:
             chunk_indices=_parse_chunk_list(args),
             force=args.force,
         ),
-        "nimbus-multislide": lambda: run_nimbus_multislide(
+        "nimbus-prepare": lambda: prepare_nimbus_normalization(
             config,
             _parse_slide_list(args),
             chunk_indices=_parse_chunk_list(args),
             force=args.force,
         ),
-        "nimbus-finalize": lambda: finalize_nimbus_multislide(config, _parse_slide_list(args)),
         "assemble-spatialdata": lambda: assemble_spatialdata(
             config,
             args.slide,

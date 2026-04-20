@@ -38,7 +38,6 @@ Stage names:
   merge
   instanseg
   nimbus
-  nimbus-finalize
   spatialdata
   qc
 
@@ -46,16 +45,15 @@ Default stages:
   merge,instanseg,nimbus,spatialdata,qc
 
 Behavior:
-  - per-slide stages (`setup`, `merge`, `instanseg`, `spatialdata`, `qc`) loop over the selected slides
-  - `nimbus` runs single-slide Nimbus for one selected slide, or multislide Nimbus when multiple slides are selected
-  - `nimbus-finalize` finalizes multislide Nimbus outputs for the selected slides
+  - all stages run per slide and write only slide-local artifacts
+  - `setup` remains channel-map generation only
+  - `nimbus` expects any shared normalization JSONs to have been prepared ahead of time with `mif-pipeline nimbus-prepare`
   - `--chunk` / `--chunks` apply only to the `nimbus` stage
 
 Examples:
   scripts/run_pipeline.sh --config prototyping/prototype_v2-Crop.yaml --slide SLIDE-0329_crop_2048
   scripts/run_pipeline.sh --config prototyping/prototype_v2-Crop.yaml --slides SLIDE-0329_crop_2048,SLIDE-0329_crop_2048_2 --stage merge --stage instanseg
   scripts/run_pipeline.sh --config prototyping/prototype_v2-Crop.yaml --slides SLIDE-0329_crop_2048,SLIDE-0329_crop_2048_2 --stage nimbus --chunk 0
-  scripts/run_pipeline.sh --config prototyping/prototype_v2-Crop.yaml --slides SLIDE-0329_crop_2048,SLIDE-0329_crop_2048_2 --stage nimbus-finalize
 EOF
 }
 
@@ -158,7 +156,7 @@ stage_env() {
     spatialdata)
       printf '%s\n' "${SPATIALDATA_ENV}"
       ;;
-    setup|merge|instanseg|nimbus|nimbus-finalize|qc)
+    setup|merge|instanseg|nimbus|qc)
       printf '%s\n' "${INSTANSEG_NIMBUS_ENV}"
       ;;
     *)
@@ -190,7 +188,7 @@ run_python_cli() {
 validate_stage() {
   local stage="$1"
   case "${stage}" in
-    setup|merge|instanseg|nimbus|nimbus-finalize|spatialdata|qc)
+    setup|merge|instanseg|nimbus|spatialdata|qc)
       ;;
     *)
       echo "Unknown stage: ${stage}" >&2
@@ -292,18 +290,6 @@ if [[ ${#CHUNK_INDICES[@]} -gt 0 ]]; then
   fi
 fi
 
-if [[ ${#SLIDE_IDS[@]} -gt 1 && ${#CHUNK_INDICES[@]} -gt 0 ]]; then
-  has_spatialdata=0
-  has_finalize=0
-  for stage_name in "${STAGES[@]}"; do
-    [[ "${stage_name}" == "spatialdata" ]] && has_spatialdata=1
-    [[ "${stage_name}" == "nimbus-finalize" ]] && has_finalize=1
-  done
-  if [[ "${has_spatialdata}" -eq 1 && "${has_finalize}" -eq 0 ]]; then
-    echo "[pipeline] warning: partial multislide Nimbus chunk execution was requested without nimbus-finalize; per-slide SpatialData may fail if spatialdata.load_nimbus=true." >&2
-  fi
-fi
-
 COMMON_ARGS=(--config "${CONFIG}")
 if [[ "${FORCE}" -eq 1 ]]; then
   COMMON_ARGS+=(--force)
@@ -322,28 +308,13 @@ for stage_name in "${STAGES[@]}"; do
       done
       ;;
     nimbus)
-      if [[ ${#SLIDE_IDS[@]} -eq 1 ]]; then
-        stage_args=(nimbus "${COMMON_ARGS[@]}" --slide "${SLIDE_IDS[0]}")
-      else
-        stage_args=(nimbus-multislide --config "${CONFIG}")
-        if [[ "${FORCE}" -eq 1 ]]; then
-          stage_args+=(--force)
-        fi
-        for slide_id in "${SLIDE_IDS[@]}"; do
-          stage_args+=(--slide "${slide_id}")
-        done
-      fi
-      for chunk_index in "${CHUNK_INDICES[@]}"; do
-        stage_args+=(--chunk "${chunk_index}")
-      done
-      run_python_cli "${env_target}" "${stage_args[@]}"
-      ;;
-    nimbus-finalize)
-      stage_args=(nimbus-finalize --config "${CONFIG}")
       for slide_id in "${SLIDE_IDS[@]}"; do
-        stage_args+=(--slide "${slide_id}")
+        stage_args=(nimbus "${COMMON_ARGS[@]}" --slide "${slide_id}")
+        for chunk_index in "${CHUNK_INDICES[@]}"; do
+          stage_args+=(--chunk "${chunk_index}")
+        done
+        run_python_cli "${env_target}" "${stage_args[@]}"
       done
-      run_python_cli "${env_target}" "${stage_args[@]}"
       ;;
   esac
 done

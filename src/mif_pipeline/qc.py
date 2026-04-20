@@ -8,7 +8,6 @@ from .config import (
     ensure_config,
     get_slide_config,
     resolve_nimbus_channel_entries,
-    resolve_nimbus_multislide_inputs,
 )
 
 
@@ -117,38 +116,6 @@ def qc_slide(config: Union[dict[str, Any], str, Path], slide_id: str) -> dict[st
                 "nimbus_prediction_images_exist",
                 bool(prediction_files),
                 f"found {len(prediction_files)} files",
-            )
-
-        multislide_block = nimbus_block.get("multislide") or {}
-        if multislide_block.get("enabled", False):
-            resolved = resolve_nimbus_multislide_inputs(config)
-            global_output_dir = Path(resolved["output_dir"])
-            global_aliases = list(resolved["aliases"])
-            global_chunk_count = len(
-                list(chunked(global_aliases, int(nimbus_block.get("channel_chunk_size", 1))))
-            )
-            global_chunk_dirs = _nimbus_chunk_dirs(global_output_dir, global_chunk_count)
-            add_check(
-                "nimbus_multislide_chunk_dirs_exist",
-                all(path.exists() for path in global_chunk_dirs),
-                f"{global_chunk_count} expected in {global_output_dir}",
-            )
-            per_slide_table = (
-                global_output_dir
-                / resolved["per_slide_output_dirname"]
-                / slide_id
-                / "cell_table_full.csv"
-            )
-            finalized = (global_output_dir / "cell_table_full.csv").exists()
-            add_check(
-                "nimbus_multislide_per_slide_table_exists",
-                per_slide_table.exists() if finalized else True,
-                str(per_slide_table),
-            )
-            add_check(
-                "nimbus_multislide_global_table_exists",
-                finalized,
-                str(global_output_dir / "cell_table_full.csv"),
             )
 
     if spatialdata_block.get("enabled", False):

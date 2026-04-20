@@ -2,18 +2,16 @@ from __future__ import annotations
 
 import os
 import shutil
+import tempfile
 from pathlib import Path
 from typing import Any, Iterable, Union
 
 from .config import (
-    canonical_nimbus_name,
     chunked,
     ensure_config,
     get_slide_config,
     infer_image_suffix,
     resolve_nimbus_channel_entries,
-    resolve_nimbus_inputs,
-    resolve_nimbus_multislide_inputs,
     strip_image_suffix,
 )
 
@@ -52,14 +50,16 @@ def _segmentation_path(mask_dir: Path, fov_path: Union[str, Path], suffix: str) 
     raise ValueError(f"Multiple masks found in {mask_dir} for Nimbus FOV {fov_key!r}.")
 
 
-def _determine_dataset_suffix(entries: Iterable[dict[str, Any]], fov_paths: list[str]) -> str:
-    entry_suffixes = {infer_image_suffix(entry["path"]) for entry in entries}
-    if len(entry_suffixes) == 1:
-        return entry_suffixes.pop()
-
-    if fov_paths and not Path(fov_paths[0]).is_dir():
-        return infer_image_suffix(fov_paths[0])
-    return ".tif"
+def _normalize_chunk_indices(chunk_indices: Iterable[int] | None, *, chunk_count: int) -> list[int]:
+    if chunk_indices is None:
+        return list(range(chunk_count))
+    selected = sorted({int(index) for index in chunk_indices})
+    invalid = [index for index in selected if index < 0 or index >= chunk_count]
+    if invalid:
+        raise ValueError(
+            f"Chunk indices out of range: {invalid}. Valid indices are 0 through {chunk_count - 1}."
+        )
+    return selected
 
 
 def _rename_join_key_columns(df):
@@ -94,70 +94,9 @@ def merge_chunk_tables(
     return merged
 
 
-def _effective_join_keys(join_keys: Iterable[str] | None, *, multislide: bool) -> list[str]:
-    keys = [str(key) for key in (join_keys or ([] if multislide else ["fov", "cell_id"]))]
-    if multislide:
-        if not keys:
-            keys = ["slide_id", "fov", "cell_id"]
-        elif "slide_id" not in keys:
-            keys = ["slide_id", *keys]
+def _effective_join_keys(join_keys: Iterable[str] | None) -> list[str]:
+    keys = [str(key) for key in (join_keys or ["fov", "cell_id"])]
     return keys or ["fov", "cell_id"]
-
-
-def _normalize_chunk_indices(chunk_indices: Iterable[int] | None, *, chunk_count: int) -> list[int]:
-    if chunk_indices is None:
-        return list(range(chunk_count))
-    selected = sorted({int(index) for index in chunk_indices})
-    invalid = [index for index in selected if index < 0 or index >= chunk_count]
-    if invalid:
-        raise ValueError(
-            f"Chunk indices out of range: {invalid}. Valid indices are 0 through {chunk_count - 1}."
-        )
-    return selected
-
-
-def _multislide_output_dir(config: dict[str, Any], slide_ids: list[str], resolved_inputs: dict[str, Any]) -> Path:
-    output_dir_value = resolved_inputs.get("output_dir")
-    if not output_dir_value:
-        if len(slide_ids) == 1:
-            slide = get_slide_config(config, slide_ids[0])
-            return Path(slide["nimbus"]["output_dir"])
-        raise ValueError(
-            "Nimbus multislide execution requires nimbus.multislide.output_dir in the top-level config."
-        )
-    return Path(output_dir_value)
-
-
-def _add_slide_id_column(frame, *, fov_name_to_slide: dict[str, str]):
-    if "fov" not in frame.columns:
-        raise ValueError("Nimbus output did not include an 'fov' column.")
-    slide_ids = frame["fov"].astype(str).map(fov_name_to_slide)
-    if slide_ids.isna().any():
-        missing = sorted(frame.loc[slide_ids.isna(), "fov"].astype(str).unique().tolist())
-        raise KeyError(
-            f"Could not map Nimbus FOV values back to slide IDs for: {', '.join(missing)}"
-        )
-    frame = frame.copy()
-    frame["slide_id"] = slide_ids.astype(str)
-    ordered = ["slide_id", *[column for column in frame.columns if column != "slide_id"]]
-    return frame.loc[:, ordered]
-
-
-def _write_per_slide_tables(merged, *, output_dir: Path, dirname: str) -> dict[str, str]:
-    per_slide_root = output_dir / dirname
-    per_slide_root.mkdir(parents=True, exist_ok=True)
-    outputs: dict[str, str] = {}
-    for slide_id, frame in merged.groupby("slide_id", sort=True, dropna=False):
-        slide_output_dir = per_slide_root / str(slide_id)
-        slide_output_dir.mkdir(parents=True, exist_ok=True)
-        slide_output_path = slide_output_dir / "cell_table_full.csv"
-        frame.to_csv(slide_output_path, index=False)
-        outputs[str(slide_id)] = str(slide_output_path)
-    return outputs
-
-
-def _expected_chunk_csvs(output_dir: Path, chunk_count: int) -> list[Path]:
-    return [output_dir / f"chunk_{index:03d}" / "nimbus_cell_table.csv" for index in range(chunk_count)]
 
 
 def _materialize_channel_link(source: Path, destination: Path) -> None:
@@ -173,41 +112,116 @@ def _materialize_channel_link(source: Path, destination: Path) -> None:
             shutil.copy2(source, destination)
 
 
-def _prepare_multislide_staging(
+def _selected_slide_ids(
+    config: dict[str, Any],
+    slide_ids: Iterable[str] | None,
+) -> list[str]:
+    if slide_ids is None:
+        selected = [str(slide_id) for slide_id in config["slides"].keys()]
+    else:
+        selected = [str(slide_id) for slide_id in slide_ids]
+    if not selected:
+        raise ValueError("At least one slide must be selected.")
+    return selected
+
+
+def _slide_nimbus_aliases(config: dict[str, Any], slide_id: str) -> list[str]:
+    return [entry["alias"] for entry in resolve_nimbus_channel_entries(config, slide_id)]
+
+
+def _shared_nimbus_aliases(config: dict[str, Any], slide_ids: list[str]) -> list[str]:
+    reference_slide_id = slide_ids[0]
+    try:
+        reference_aliases = _slide_nimbus_aliases(config, reference_slide_id)
+    except KeyError as exc:
+        raise ValueError(
+            "Nimbus normalization prep requires identical alias selection across slides, "
+            f"but slide {reference_slide_id} could not resolve its configured aliases."
+        ) from exc
+    for slide_id in slide_ids[1:]:
+        try:
+            aliases = _slide_nimbus_aliases(config, slide_id)
+        except KeyError as exc:
+            raise ValueError(
+                "Nimbus normalization prep requires identical alias selection across slides, "
+                f"but slide {slide_id} could not resolve its configured aliases."
+            ) from exc
+        if aliases != reference_aliases:
+            raise ValueError(
+                "Nimbus normalization prep requires identical alias selection across slides. "
+                f"Reference slide {reference_slide_id}: {reference_aliases}; slide {slide_id}: {aliases}."
+            )
+    return reference_aliases
+
+
+def _slide_chunk_dir(slide: dict[str, Any], chunk_index: int) -> Path:
+    nimbus = slide.get("nimbus") or {}
+    return Path(nimbus["output_dir"]) / f"chunk_{chunk_index:03d}"
+
+
+def _chunk_json_path(slide: dict[str, Any], chunk_index: int) -> Path:
+    return _slide_chunk_dir(slide, chunk_index) / "normalization_dict.json"
+
+
+def _slide_mask_path(slide: dict[str, Any]) -> Path:
+    mask_export = slide.get("mask_export") or {}
+    mask_dir = Path(mask_export["mask_dir"])
+    return mask_dir / f"{slide['slide_id']}{mask_export.get('suffix', '_whole_cell.tiff')}"
+
+
+def _full_merge_path(slide: dict[str, Any]) -> Path:
+    full_merge = slide.get("full_merge") or {}
+    if not full_merge.get("enabled", False):
+        raise ValueError(
+            f"Slide {slide['slide_id']} must enable full_merge before running Nimbus."
+        )
+    return Path(full_merge["ome_path"])
+
+
+def _raw_channel_suffix(entries: Iterable[dict[str, Any]]) -> str:
+    suffixes = {infer_image_suffix(entry["path"]) for entry in entries}
+    if len(suffixes) != 1:
+        raise ValueError(
+            "Nimbus normalization prep requires selected raw channel images to share one suffix."
+        )
+    return suffixes.pop()
+
+
+def _stage_alias_named_fovs(
     *,
-    output_dir: Path,
+    config: dict[str, Any],
     slide_ids: list[str],
     aliases: list[str],
-    config: dict[str, Any],
+    staging_root: Path,
 ) -> tuple[list[str], str]:
-    staging_root = output_dir / "_multislide_fovs"
-    staged_fov_paths: list[str] = []
-    staged_suffixes = {
-        infer_image_suffix(entry["path"])
-        for slide_id in slide_ids
-        for entry in resolve_nimbus_channel_entries(config, slide_id)
-        if entry["alias"] in aliases
-    }
-    if len(staged_suffixes) != 1:
-        raise ValueError(
-            "Nimbus multislide staging requires all selected channel images to share the same suffix."
-        )
-    staged_suffix = staged_suffixes.pop()
-
+    selected_entries: dict[str, list[dict[str, Any]]] = {}
     for slide_id in slide_ids:
-        slide_stage_dir = staging_root / slide_id
-        slide_stage_dir.mkdir(parents=True, exist_ok=True)
-        for entry in resolve_nimbus_channel_entries(config, slide_id):
-            alias = str(entry["alias"])
-            if alias not in aliases:
-                continue
-            destination = slide_stage_dir / f"{alias}{staged_suffix}"
-            _materialize_channel_link(Path(entry["path"]).resolve(), destination)
-        staged_fov_paths.append(str(slide_stage_dir.resolve()))
+        entries = [
+            entry
+            for entry in resolve_nimbus_channel_entries(config, slide_id)
+            if entry["alias"] in aliases
+        ]
+        selected_entries[slide_id] = entries
+
+    staged_suffix = _raw_channel_suffix(
+        entry
+        for entries in selected_entries.values()
+        for entry in entries
+    )
+
+    staged_fov_paths: list[str] = []
+    for slide_id in slide_ids:
+        stage_dir = staging_root / slide_id
+        stage_dir.mkdir(parents=True, exist_ok=True)
+        for entry in selected_entries[slide_id]:
+            source = Path(entry["path"]).resolve()
+            destination = stage_dir / f"{entry['alias']}{staged_suffix}"
+            _materialize_channel_link(source, destination)
+        staged_fov_paths.append(str(stage_dir))
     return staged_fov_paths, staged_suffix
 
 
-def run_nimbus_multislide(
+def prepare_nimbus_normalization(
     config: Union[dict[str, Any], str, Path],
     slide_ids: Iterable[str] | None = None,
     *,
@@ -215,12 +229,11 @@ def run_nimbus_multislide(
     force: bool = False,
     dry_run: bool = False,
 ) -> dict[str, Any]:
-    """Run Nimbus in channel chunks over a combined multislide FOV list."""
+    """Prepare shared Nimbus normalization JSONs and copy them into each slide-local chunk dir."""
     config = ensure_config(config)
-    resolved_inputs = resolve_nimbus_multislide_inputs(config, slide_ids)
-    selected_slide_ids = list(resolved_inputs["slide_ids"])
-    reference_slide = get_slide_config(config, selected_slide_ids[0])
-    reference_nimbus = reference_slide.get("nimbus") or {}
+    selected_slide_ids = _selected_slide_ids(config, slide_ids)
+    selected_slides = [get_slide_config(config, slide_id) for slide_id in selected_slide_ids]
+    reference_nimbus = (selected_slides[0].get("nimbus") or {})
 
     if not reference_nimbus.get("enabled", False):
         return {
@@ -228,213 +241,103 @@ def run_nimbus_multislide(
             "status": "disabled",
             "chunks": [],
             "dry_run": dry_run,
-            "mode": "multislide",
         }
 
-    channel_aliases = list(resolved_inputs["aliases"])
-    entry_lookup = {
-        entry["alias"]: entry
-        for entry in resolve_nimbus_channel_entries(config, selected_slide_ids[0])
-    }
-    fov_paths = list(resolved_inputs["fov_paths"])
-    if not fov_paths:
-        raise ValueError("Nimbus multislide inputs resolved to an empty FOV list.")
-
-    channel_chunk_size = int(reference_nimbus.get("channel_chunk_size", 1))
-    chunk_aliases = list(chunked(channel_aliases, channel_chunk_size))
+    shared_aliases = _shared_nimbus_aliases(config, selected_slide_ids)
+    chunk_aliases = list(chunked(shared_aliases, int(reference_nimbus.get("channel_chunk_size", 1))))
     selected_chunk_indices = _normalize_chunk_indices(chunk_indices, chunk_count=len(chunk_aliases))
-    output_dir = _multislide_output_dir(config, selected_slide_ids, resolved_inputs)
-    merged_csv = output_dir / "cell_table_full.csv"
-    join_keys = _effective_join_keys(reference_nimbus.get("join_keys"), multislide=True)
-    per_slide_dirname = str(resolved_inputs["per_slide_output_dirname"])
-    complete_chunk_selection = len(selected_chunk_indices) == len(chunk_aliases)
 
     result = {
         "slide_ids": selected_slide_ids,
-        "mode": "multislide",
-        "fov_paths": fov_paths,
-        "fov_name_to_slide": dict(resolved_inputs["fov_name_to_slide"]),
-        "raw_paths_by_slide": dict(resolved_inputs["raw_paths_by_slide"]),
-        "source_names_by_slide": dict(resolved_inputs["source_names_by_slide"]),
         "chunk_count": len(chunk_aliases),
         "selected_chunk_indices": selected_chunk_indices,
         "selected_chunk_count": len(selected_chunk_indices),
-        "complete_chunk_selection": complete_chunk_selection,
-        "chunks": [],
-        "merged_csv": str(merged_csv),
-        "output_dir": str(output_dir),
-        "per_slide_output_dir": str(output_dir / per_slide_dirname),
-        "join_keys": list(join_keys),
         "dry_run": dry_run,
+        "chunks": [],
     }
+
+    for index in selected_chunk_indices:
+        aliases = list(chunk_aliases[index])
+        target_paths = {
+            slide["slide_id"]: str(_chunk_json_path(slide, index))
+            for slide in selected_slides
+        }
+        result["chunks"].append(
+            {
+                "chunk_index": index,
+                "aliases": aliases,
+                "normalization_dict_paths": target_paths,
+            }
+        )
 
     if dry_run:
-        for index in selected_chunk_indices:
-            aliases = chunk_aliases[index]
-            result["chunks"].append(
-                {
-                    "chunk_index": index,
-                    "aliases": list(aliases),
-                    "nimbus_channels": list(aliases),
-                    "output_dir": str(output_dir / f"chunk_{index:03d}"),
-                }
-            )
         result["status"] = "planned"
-        if complete_chunk_selection:
-            result["per_slide_tables"] = {
-                slide_id: str(output_dir / per_slide_dirname / slide_id / "cell_table_full.csv")
-                for slide_id in selected_slide_ids
-            }
-        result["staged_fov_paths"] = [
-            str(output_dir / "_multislide_fovs" / slide_id)
-            for slide_id in selected_slide_ids
-        ]
         return result
 
-    Nimbus, MultiplexDataset = _import_nimbus()
-    output_dir.mkdir(parents=True, exist_ok=True)
-    chunk_csv_paths: list[Path] = []
-
-    slide_lookup = dict(resolved_inputs["fov_name_to_slide"])
-    staged_fov_paths, staged_suffix = _prepare_multislide_staging(
-        output_dir=output_dir,
-        slide_ids=selected_slide_ids,
-        aliases=channel_aliases,
-        config=config,
-    )
-    result["staged_fov_paths"] = staged_fov_paths
-    for index in selected_chunk_indices:
-        aliases = chunk_aliases[index]
-        entries = [entry_lookup[alias] for alias in aliases]
-        include_channels = [str(entry["alias"]) for entry in entries]
-        chunk_dir = output_dir / f"chunk_{index:03d}"
-        chunk_dir.mkdir(parents=True, exist_ok=True)
-        chunk_csv = chunk_dir / "nimbus_cell_table.csv"
-
-        chunk_result = {
-            "chunk_index": index,
-            "aliases": list(aliases),
-            "nimbus_channels": include_channels,
-            "output_dir": str(chunk_dir),
-            "cell_table_csv": str(chunk_csv),
+    wrote_any = False
+    reused_all = True
+    for chunk_result in result["chunks"]:
+        index = int(chunk_result["chunk_index"])
+        aliases = list(chunk_result["aliases"])
+        chunk_target_paths = {
+            slide["slide_id"]: _chunk_json_path(slide, index)
+            for slide in selected_slides
         }
-        result["chunks"].append(chunk_result)
-
-        if chunk_csv.exists() and not force:
-            chunk_result["status"] = "skipped"
-            chunk_csv_paths.append(chunk_csv)
+        missing_paths = [
+            path for path in chunk_target_paths.values() if not path.exists()
+        ]
+        if not missing_paths and not force:
+            chunk_result["status"] = "reused"
             continue
 
-        def segmentation_naming_convention(fov_path: str) -> str:
-            slide_id = Path(fov_path).name
-            slide = get_slide_config(config, slide_id)
-            mask_export = slide.get("mask_export") or {}
-            mask_dir = Path(mask_export["mask_dir"])
-            mask_suffix = mask_export.get("suffix", "_whole_cell.tiff")
-            return str(_segmentation_path(mask_dir, fov_path, mask_suffix))
+        _Nimbus, MultiplexDataset = _import_nimbus()
+        reused_all = False
+        with tempfile.TemporaryDirectory(prefix=f"mif_pipeline_nimbus_prep_{index:03d}_") as temp_dir:
+            temp_root = Path(temp_dir)
+            staged_fov_paths, staged_suffix = _stage_alias_named_fovs(
+                config=config,
+                slide_ids=selected_slide_ids,
+                aliases=aliases,
+                staging_root=temp_root / "fovs",
+            )
+            prep_output_dir = temp_root / "output"
+            prep_output_dir.mkdir(parents=True, exist_ok=True)
 
-        dataset = MultiplexDataset(
-            fov_paths=staged_fov_paths,
-            suffix=staged_suffix,
-            include_channels=include_channels,
-            segmentation_naming_convention=segmentation_naming_convention,
-            output_dir=str(chunk_dir),
-        )
-        dataset.prepare_normalization_dict(
-            quantile=float(reference_nimbus.get("quantile", 0.999)),
-            n_subset=reference_nimbus.get("n_subset", 50),
-            clip_values=tuple(reference_nimbus.get("clip_values", [0, 2])),
-            multiprocessing=bool(reference_nimbus.get("multiprocessing", True)),
-            overwrite=force,
-        )
+            dataset = MultiplexDataset(
+                fov_paths=staged_fov_paths,
+                suffix=staged_suffix,
+                include_channels=aliases,
+                output_dir=str(prep_output_dir),
+            )
+            dataset.prepare_normalization_dict(
+                quantile=float(reference_nimbus.get("quantile", 0.999)),
+                n_subset=reference_nimbus.get("n_subset", 50),
+                clip_values=tuple(reference_nimbus.get("clip_values", [0, 2])),
+                multiprocessing=bool(reference_nimbus.get("multiprocessing", True)),
+                overwrite=True,
+            )
 
-        nimbus = Nimbus(
-            dataset=dataset,
-            output_dir=str(chunk_dir),
-            save_predictions=bool(reference_nimbus.get("save_predictions", True)),
-            batch_size=int(reference_nimbus.get("batch_size", 16)),
-            test_time_aug=True,
-            input_shape=[1024, 1024],
-            device="auto",
-            compile_model=bool(reference_nimbus.get("compile_model", False)),
-            mixed_precision=False,
-        )
-        nimbus.check_inputs()
-        cell_table = _rename_join_key_columns(nimbus.predict_fovs())
-        cell_table = _add_slide_id_column(cell_table, fov_name_to_slide=slide_lookup)
-        cell_table.to_csv(chunk_csv, index=False)
-        chunk_csv_paths.append(chunk_csv)
-        chunk_result["status"] = "written"
-        chunk_result["row_count"] = int(len(cell_table.index))
+            generated_json = prep_output_dir / "normalization_dict.json"
+            if not generated_json.exists():
+                raise FileNotFoundError(
+                    f"Nimbus normalization prep did not produce {generated_json}."
+                )
 
-    if complete_chunk_selection:
-        merged = merge_chunk_tables(chunk_csv_paths, merged_csv, join_keys=join_keys)
-        per_slide_tables = _write_per_slide_tables(
-            merged,
-            output_dir=output_dir,
-            dirname=per_slide_dirname,
-        )
-        result["status"] = "written"
-        result["merged_row_count"] = int(len(merged.index))
-        result["merged_columns"] = list(merged.columns)
-        result["per_slide_tables"] = per_slide_tables
-        result["finalized"] = True
-    else:
-        result["status"] = "partial"
-        result["finalized"] = False
+            wrote_for_chunk: dict[str, str] = {}
+            for slide in selected_slides:
+                target_path = chunk_target_paths[slide["slide_id"]]
+                target_path.parent.mkdir(parents=True, exist_ok=True)
+                if force or not target_path.exists():
+                    shutil.copy2(generated_json, target_path)
+                    wrote_any = True
+                    wrote_for_chunk[slide["slide_id"]] = str(target_path)
+            chunk_result["status"] = "written"
+            chunk_result["staged_fov_paths"] = staged_fov_paths
+            chunk_result["staged_suffix"] = staged_suffix
+            chunk_result["written_paths"] = wrote_for_chunk
 
+    result["status"] = "reused" if reused_all and not wrote_any else "written"
     return result
-
-
-def finalize_nimbus_multislide(
-    config: Union[dict[str, Any], str, Path],
-    slide_ids: Iterable[str] | None = None,
-) -> dict[str, Any]:
-    """Merge completed multislide Nimbus chunk outputs into canonical tables."""
-    config = ensure_config(config)
-    resolved_inputs = resolve_nimbus_multislide_inputs(config, slide_ids)
-    selected_slide_ids = list(resolved_inputs["slide_ids"])
-    reference_slide = get_slide_config(config, selected_slide_ids[0])
-    reference_nimbus = reference_slide.get("nimbus") or {}
-
-    if not reference_nimbus.get("enabled", False):
-        return {
-            "slide_ids": selected_slide_ids,
-            "status": "disabled",
-            "mode": "multislide_finalize",
-        }
-
-    channel_aliases = list(resolved_inputs["aliases"])
-    chunk_aliases = list(chunked(channel_aliases, int(reference_nimbus.get("channel_chunk_size", 1))))
-    output_dir = _multislide_output_dir(config, selected_slide_ids, resolved_inputs)
-    per_slide_dirname = str(resolved_inputs["per_slide_output_dirname"])
-    join_keys = _effective_join_keys(reference_nimbus.get("join_keys"), multislide=True)
-    merged_csv = output_dir / "cell_table_full.csv"
-    expected_chunk_csvs = _expected_chunk_csvs(output_dir, len(chunk_aliases))
-    missing = [str(path) for path in expected_chunk_csvs if not path.exists()]
-    if missing:
-        raise FileNotFoundError(
-            "Cannot finalize Nimbus multislide outputs because the following chunk tables are missing: "
-            + ", ".join(missing)
-        )
-
-    merged = merge_chunk_tables(expected_chunk_csvs, merged_csv, join_keys=join_keys)
-    per_slide_tables = _write_per_slide_tables(
-        merged,
-        output_dir=output_dir,
-        dirname=per_slide_dirname,
-    )
-    return {
-        "slide_ids": selected_slide_ids,
-        "mode": "multislide_finalize",
-        "status": "written",
-        "chunk_count": len(chunk_aliases),
-        "merged_csv": str(merged_csv),
-        "merged_row_count": int(len(merged.index)),
-        "merged_columns": list(merged.columns),
-        "join_keys": list(join_keys),
-        "per_slide_tables": per_slide_tables,
-    }
 
 
 def run_nimbus_chunked(
@@ -445,14 +348,136 @@ def run_nimbus_chunked(
     force: bool = False,
     dry_run: bool = False,
 ) -> dict[str, Any]:
-    """Run Nimbus in channel chunks and merge the per-chunk cell tables."""
-    result = run_nimbus_multislide(
-        config,
-        [slide_id],
-        chunk_indices=chunk_indices,
-        force=force,
-        dry_run=dry_run,
-    )
-    result["slide_id"] = slide_id
-    result["raw_paths"] = list(resolve_nimbus_inputs(ensure_config(config), slide_id)["raw_paths"])
+    """Run Nimbus in channel chunks for one slide and merge the slide-local cell table."""
+    config = ensure_config(config)
+    slide = get_slide_config(config, slide_id)
+    nimbus = slide.get("nimbus") or {}
+
+    if not nimbus.get("enabled", False):
+        return {
+            "slide_id": slide_id,
+            "status": "disabled",
+            "chunks": [],
+            "dry_run": dry_run,
+        }
+
+    full_merge_path = _full_merge_path(slide)
+    if not dry_run and not full_merge_path.exists():
+        raise FileNotFoundError(
+            f"Cannot run Nimbus for {slide_id}: merged OME-TIFF not found at {full_merge_path}."
+        )
+
+    mask_path = _slide_mask_path(slide)
+    if not dry_run and not mask_path.exists():
+        raise FileNotFoundError(
+            f"Cannot run Nimbus for {slide_id}: whole-cell mask not found at {mask_path}."
+        )
+
+    entries = resolve_nimbus_channel_entries(config, slide_id)
+    entry_lookup = {entry["alias"]: entry for entry in entries}
+    aliases = [entry["alias"] for entry in entries]
+    channel_chunk_size = int(nimbus.get("channel_chunk_size", 1))
+    chunk_aliases = list(chunked(aliases, channel_chunk_size))
+    selected_chunk_indices = _normalize_chunk_indices(chunk_indices, chunk_count=len(chunk_aliases))
+    join_keys = _effective_join_keys(nimbus.get("join_keys"))
+    output_dir = Path(nimbus["output_dir"])
+    merged_csv = output_dir / "cell_table_full.csv"
+
+    result = {
+        "slide_id": slide_id,
+        "status": "planned" if dry_run else "written",
+        "full_merge_path": str(full_merge_path),
+        "mask_path": str(mask_path),
+        "output_dir": str(output_dir),
+        "chunk_count": len(chunk_aliases),
+        "selected_chunk_indices": selected_chunk_indices,
+        "selected_chunk_count": len(selected_chunk_indices),
+        "join_keys": list(join_keys),
+        "merged_csv": str(merged_csv),
+        "dry_run": dry_run,
+        "chunks": [],
+    }
+
+    for index in selected_chunk_indices:
+        aliases_for_chunk = list(chunk_aliases[index])
+        chunk_dir = output_dir / f"chunk_{index:03d}"
+        chunk_csv = chunk_dir / "nimbus_cell_table.csv"
+        normalization_dict_path = chunk_dir / "normalization_dict.json"
+        result["chunks"].append(
+            {
+                "chunk_index": index,
+                "aliases": aliases_for_chunk,
+                "nimbus_channels": aliases_for_chunk,
+                "source_paths": [str(Path(entry_lookup[alias]["path"])) for alias in aliases_for_chunk],
+                "output_dir": str(chunk_dir),
+                "cell_table_csv": str(chunk_csv),
+                "normalization_dict_path": str(normalization_dict_path),
+                "normalization_dict_exists": normalization_dict_path.exists(),
+            }
+        )
+
+    if dry_run:
+        return result
+
+    Nimbus, MultiplexDataset = _import_nimbus()
+    output_dir.mkdir(parents=True, exist_ok=True)
+    chunk_csv_paths: list[Path] = []
+    partial_selection = len(selected_chunk_indices) != len(chunk_aliases)
+
+    def segmentation_naming_convention(_fov_path: str) -> str:
+        return str(mask_path)
+
+    for chunk_result in result["chunks"]:
+        chunk_dir = Path(chunk_result["output_dir"])
+        chunk_dir.mkdir(parents=True, exist_ok=True)
+        chunk_csv = Path(chunk_result["cell_table_csv"])
+        if chunk_csv.exists() and not force:
+            chunk_result["status"] = "skipped"
+            chunk_csv_paths.append(chunk_csv)
+            continue
+
+        include_channels = list(chunk_result["nimbus_channels"])
+        dataset = MultiplexDataset(
+            fov_paths=[str(full_merge_path)],
+            suffix=infer_image_suffix(full_merge_path),
+            include_channels=include_channels,
+            segmentation_naming_convention=segmentation_naming_convention,
+            output_dir=str(chunk_dir),
+        )
+        dataset.prepare_normalization_dict(
+            quantile=float(nimbus.get("quantile", 0.999)),
+            n_subset=nimbus.get("n_subset", 50),
+            clip_values=tuple(nimbus.get("clip_values", [0, 2])),
+            multiprocessing=bool(nimbus.get("multiprocessing", True)),
+            overwrite=force,
+        )
+
+        nimbus_model = Nimbus(
+            dataset=dataset,
+            output_dir=str(chunk_dir),
+            save_predictions=bool(nimbus.get("save_predictions", True)),
+            batch_size=int(nimbus.get("batch_size", 16)),
+            test_time_aug=True,
+            input_shape=[1024, 1024],
+            device="auto",
+            compile_model=bool(nimbus.get("compile_model", False)),
+            mixed_precision=False,
+        )
+        nimbus_model.check_inputs()
+        cell_table = _rename_join_key_columns(nimbus_model.predict_fovs())
+        cell_table.to_csv(chunk_csv, index=False)
+        chunk_csv_paths.append(chunk_csv)
+        chunk_result["status"] = "written"
+        chunk_result["row_count"] = int(len(cell_table.index))
+
+    if partial_selection:
+        result["status"] = "partial"
+        result["finalized"] = False
+        return result
+
+    merged = merge_chunk_tables(chunk_csv_paths, merged_csv, join_keys=join_keys)
+    result["status"] = "written"
+    result["finalized"] = True
+    result["merged_row_count"] = int(len(merged.index))
+    result["merged_columns"] = list(merged.columns)
     return result
