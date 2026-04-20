@@ -173,6 +173,59 @@ print_command() {
   echo "[pipeline] ${timestamp} env=${env_target:-current} command: $*"
 }
 
+log_job_context() {
+  local env_target="$1"
+
+  echo "===== JOB CONTEXT ====="
+  date
+  hostname
+  echo "SLURM_JOB_ID=${SLURM_JOB_ID:-}"
+  echo "SLURM_JOB_NODELIST=${SLURM_JOB_NODELIST:-}"
+  echo "SLURM_JOB_GPUS=${SLURM_JOB_GPUS:-}"
+  echo "CUDA_VISIBLE_DEVICES=${CUDA_VISIBLE_DEVICES:-}"
+  echo
+
+  echo "===== NVIDIA-SMI ====="
+  nvidia-smi -L || true
+  nvidia-smi || true
+  echo
+
+  echo "===== TORCH CUDA CHECK ====="
+  activate_env_if_needed "${env_target}"
+  PYTHONPATH="${REPO_ROOT}/src${PYTHONPATH:+:${PYTHONPATH}}" python - <<'PY'
+import json
+
+try:
+    import torch
+except Exception as exc:
+    print(json.dumps({"torch_import_error": str(exc)}))
+    raise SystemExit(0)
+
+summary = {
+    "torch_version": getattr(torch, "__version__", "unknown"),
+    "cuda_available": bool(torch.cuda.is_available()),
+    "device_count": int(torch.cuda.device_count()),
+}
+print(json.dumps(summary, indent=2))
+
+if torch.cuda.is_available() and torch.cuda.device_count() > 0:
+    devices = []
+    for index in range(torch.cuda.device_count()):
+        props = torch.cuda.get_device_properties(index)
+        devices.append(
+            {
+                "device_index": index,
+                "name": props.name,
+                "total_memory_gb": round(props.total_memory / 1024**3, 2),
+                "multi_processor_count": props.multi_processor_count,
+                "compute_capability": f"{props.major}.{props.minor}",
+            }
+        )
+    print(json.dumps({"devices": devices}, indent=2))
+PY
+  echo
+}
+
 run_python_cli() {
   local env_target="$1"
   shift
@@ -295,8 +348,14 @@ if [[ "${FORCE}" -eq 1 ]]; then
   COMMON_ARGS+=(--force)
 fi
 
+logged_job_context=0
+
 for stage_name in "${STAGES[@]}"; do
   env_target="$(stage_env "${stage_name}")"
+  if [[ "${logged_job_context}" -eq 0 ]]; then
+    log_job_context "${env_target}"
+    logged_job_context=1
+  fi
   case "${stage_name}" in
     setup|merge|instanseg|spatialdata|qc)
       for slide_id in "${SLIDE_IDS[@]}"; do
