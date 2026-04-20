@@ -12,6 +12,7 @@ SPATIALDATA_ENV="${SPATIALDATA_ENV:-}"
 # Default SLURM resources.
 SBATCH_BIN="${SBATCH_BIN:-sbatch}"
 SLURM_PARTITION="${SLURM_PARTITION:-}"
+SLURM_EXCLUDE="${SLURM_EXCLUDE:-}"
 SLURM_CPUS="${SLURM_CPUS:-8}"
 SLURM_MEM="${SLURM_MEM:-64G}"
 SLURM_TIME="${SLURM_TIME:-24:00:00}"
@@ -45,6 +46,7 @@ Options:
   --stage NAME            Stage to run. Repeat to set an explicit stage list.
   --stages A,B,C          Comma-separated stage list.
   --partition NAME        SLURM partition.
+  --exclude NODE[,NODE]   Exclude one or more SLURM nodes.
   --cpus N                CPUs per submitted slide job.
   --mem MEM               Memory per submitted slide job.
   --time HH:MM:SS         Wall time per submitted slide job.
@@ -168,6 +170,9 @@ submit_job() {
   if [[ -n "${SLURM_PARTITION}" ]]; then
     sbatch_cmd+=(--partition "${SLURM_PARTITION}")
   fi
+  if [[ -n "${SLURM_EXCLUDE}" ]]; then
+    sbatch_cmd+=(--exclude "${SLURM_EXCLUDE}")
+  fi
   if [[ "${SLURM_GPUS}" =~ ^[1-9][0-9]*$ ]]; then
     sbatch_cmd+=(--gpus "${SLURM_GPUS}")
   fi
@@ -237,6 +242,10 @@ while [[ $# -gt 0 ]]; do
       ;;
     --partition)
       SLURM_PARTITION="${2:-}"
+      shift 2
+      ;;
+    --exclude)
+      SLURM_EXCLUDE="${2:-}"
       shift 2
       ;;
     --cpus)
@@ -349,6 +358,7 @@ python3 - <<'PY' \
   "${BATCH_DIR}" \
   "${PLAN_ONLY}" \
   "${SLURM_PARTITION}" \
+  "${SLURM_EXCLUDE}" \
   "${SLURM_CPUS}" \
   "${SLURM_MEM}" \
   "${SLURM_TIME}" \
@@ -365,12 +375,13 @@ config_path = sys.argv[3]
 batch_dir = sys.argv[4]
 plan_only = bool(int(sys.argv[5]))
 partition = sys.argv[6] or None
-cpus = int(sys.argv[7])
-mem = sys.argv[8]
-time_value = sys.argv[9]
-gpus = int(sys.argv[10])
-stages = [value for value in sys.argv[11].splitlines() if value]
-slides = [value for value in sys.argv[12].splitlines() if value]
+exclude = sys.argv[7] or None
+cpus = int(sys.argv[8])
+mem = sys.argv[9]
+time_value = sys.argv[10]
+gpus = int(sys.argv[11])
+stages = [value for value in sys.argv[12].splitlines() if value]
+slides = [value for value in sys.argv[13].splitlines() if value]
 
 records = []
 if records_path.exists():
@@ -397,6 +408,7 @@ manifest = {
     "stages": stages,
     "resources": {
         "partition": partition,
+        "exclude": exclude,
         "cpus": cpus,
         "mem": mem,
         "time": time_value,

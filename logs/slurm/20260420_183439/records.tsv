@@ -1,0 +1,1 @@
+SLIDE-0329_crop_2048		/home/ratnayn/codex/mIF-pipeline/logs/slurm/20260420_183439/SLIDE-0329_crop_2048.out	/home/ratnayn/codex/mIF-pipeline/logs/slurm/20260420_183439/SLIDE-0329_crop_2048.err	bash /home/ratnayn/codex/mIF-pipeline/scripts/run_pipeline.sh --config prototyping/prototype_v2-Crop.yaml --stage spatialdata --stage qc --slide SLIDE-0329_crop_2048
