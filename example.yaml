@@ -5,6 +5,9 @@ setup:
   channel_patterns: ["*.tif"]
   channel_map_output: channel_map.generated.json
   include_round_in_alias: true
+  # Optional post-generation refinements applied consistently to every selected slide.
+  remove_aliases: []
+  rename_aliases: {}
 
 full_merge:
   enabled: true

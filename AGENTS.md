@@ -1,222 +1,191 @@
-# Codex Agent Instructions: MIF InstanSeg → Nimbus Pipeline (Single Environment)
+# Codex Agent Instructions: mIF File-Artifact Pipeline
 
-## Reference materials in this repo
+## Read This First
+
+This repo has evolved beyond the original single-environment InstanSeg → Nimbus-only plan.
+
+The current supported workflow is:
+
+1. `setup`: generate channel maps
+2. `merge`: write one canonical `full_merge.ome.tif` per slide
+3. `instanseg`: run direct medium-mode InstanSeg on the merged OME-TIFF and export whole-cell / nuclear masks
+4. `nimbus-prepare`: compute shared normalization JSONs across a selected slide set
+5. `nimbus`: run Nimbus per slide using slide-local chunk folders
+6. `assemble-spatialdata`: build and finalize the canonical slide-local SpatialData store
+7. `qc`: run lightweight file and shape checks
+
+The intended cluster model is:
+
+- interactive prep in notebooks or Python API for `setup` and `nimbus-prepare`
+- one SLURM job per slide afterward
+- explicit restart by resubmitting that slide with a chosen stage list
+
+Do not reintroduce the old multislide Nimbus output root, chunk-group SLURM graph, or `seg_merge` artifact unless the user explicitly requests that rollback.
+
+## Reference Materials
+
 Use the `Reference/` folder as the primary source of truth for external API usage and expected behavior.
 
 `Reference/` contains:
+
 - the `instanseg-main` repo snapshot
-- the Nimbus-Inference repo
-- prototype notebooks I ran successfully:
-  - `merge_ometiff_test.ipynb`
-  - `1_Nimbus_Predict_test.ipynb`
-  - `instanseg_WSI_0272_test_v2.ipynb`
+- the `Nimbus-Inference` repo snapshot
+- prototype notebooks that informed the current call patterns
 
-Before implementing wrappers, read those prototypes and mirror their working call patterns rather than guessing APIs.
+Before changing external-tool integration, read the relevant reference notebook or source code instead of guessing the API.
 
-The notebooks in `Reference/` are cluster-run prototypes, so treat them as the source of truth for real execution patterns.
+## Current Design Decisions
 
-## Objective
-Implement a small, readable pipeline repo that:
+These are now deliberate and should be preserved unless the user asks for a change.
 
-1. Merges multiplex IF images into two merged OME-TIFFs per slide:
-   - **segmentation merge**: subset of channels for InstanSeg
-   - **full merge**: all or most channels for later SpatialData import
+### Merged image strategy
 
-2. Runs InstanSeg on the segmentation-merge OME-TIFF using forced `medium` processing and writes full-resolution mask outputs directly.
+- There is only one persisted merged image artifact per slide: `full_merge.ome.tif`.
+- `seg_merge` is no longer supported.
+- `instanseg.channels` defines the segmentation channel subset to read from the merged image.
+- `nimbus.channels` defines the Nimbus channel subset.
 
-3. Exports full-resolution whole-cell instance masks as uint32 tiled BigTIFFs by upsampling InstanSeg label images with nearest-neighbor only.
+### SpatialData strategy
 
-4. Runs Nimbus inference over many channels using channel chunking, writing each chunk into its own output folder so fixed Nimbus filenames and prediction images do not overwrite each other.
+- The canonical deliverable is the final slide-local SpatialData store.
+- SpatialData assembly runs in a modern Harpy + SpatialData environment, separate from the InstanSeg/Nimbus environment.
+- The image import path should use the working `tiffslide -> zarr -> xarray -> DataTree -> SpatialData` approach, not the older direct `Image2DModel.parse(...)` path for the merged OME-TIFF.
+- Raster labels are the segmentation source of truth.
+- Shapes are optional derived artifacts.
 
-Do **not** implement SpatialData in this repo. The goal here is file handling, merging, segmentation, mask export, Nimbus inference, and simple QC.
+### Nimbus strategy
 
-## Environment
-InstanSeg and Nimbus-Inference are installed in the same Python environment.
+- `nimbus.multislide` is no longer supported in config.
+- Shared normalization across slides is still supported, but only through `prepare_nimbus_normalization(...)`.
+- That prep step computes one normalization dictionary per chunk across the selected slide set, then copies `normalization_dict.json` into each slide-local `nimbus/chunk_XXX/` folder.
+- `run_nimbus_chunked(...)` is the only active Nimbus execution path and should remain single-slide.
 
-Do **not** build multi-env orchestration or `conda run` wrappers.
-Implement importable Python functions and a thin CLI wrapper around them.
+### Cluster strategy
 
-## Cluster execution expectations
-This project is developed against data on a compute cluster.
+- The shell runner `scripts/run_pipeline.sh` is the per-slide execution engine.
+- `scripts/run_pipeline_parallel.sh` is the per-slide SLURM submission wrapper.
+- The wrapper should submit one job per slide, not a dependency graph across chunk groups.
+- Recovery should remain “rerun the slide with an explicit stage list”.
 
-Important:
-- The real slide and image inputs live on cluster paths like `/data1/lowes/...`, and Codex should assume those paths are not available in its execution environment.
-- Codex should **not** try to run the full pipeline end-to-end on the real dataset.
-- Codex should focus on:
-  - implementing the code,
-  - keeping the Python API and CLI usable,
-  - adding dry-run and path-resolution logic,
-  - adding lightweight validation and smoke tests that do not require cluster data,
-  - following the working call patterns from the prototype notebooks in `Reference/`.
+## Config Expectations
 
-When verification is needed:
-- prefer import checks, config parsing, path resolution, and small unit tests;
-- do not assume access to the cluster filesystem;
-- do not assume access to the real slide data;
-- do not block implementation on being able to run the actual pipeline.
+The config schema should match `example.yaml`.
 
-The intended workflow is:
-- Codex writes and refactors the code in the repo,
-- I run the actual pipeline later on the cluster.
+Top-level shared defaults commonly include:
 
-## Design principles
-- Keep the codebase simple and reviewable.
-- Prefer a Python-first API that can be called directly from a notebook.
-- The CLI should be a thin wrapper over those same functions.
-- Use explicit config-driven paths and clear logging.
-- Prefer a few clear modules over a large framework.
-- Get the core working for the existing example slide and config layout first, then generalize.
-- Avoid over-engineering. Non-pyramidal OME-TIFF output is acceptable initially unless the prototype notebooks clearly require something else.
+- `pixel_size_um`
+- `setup`
+- `full_merge`
+- `instanseg`
+- `mask_export`
+- `nimbus`
+- `spatialdata`
 
-## Current repo state
-- The repo now contains implemented Python modules under `src/mif_pipeline/` for config loading, setup, OME-TIFF merging, InstanSeg execution, mask export, Nimbus chunked inference, QC, CLI wiring, and top-level orchestration.
-- Active exploratory notebooks live under `prototyping/`.
-- Legacy debug notebooks and one-off helper scripts may be moved under `old/` to keep the active repo surface small.
-- There is a short handoff summary in `HANDOFF.md` intended for future Codex sessions after the repo is moved to WSL.
-- `channel_map.example.json` is referenced relative to `example.yaml`, so the repo can be moved without rewriting that specific path.
+Per-slide blocks under `slides.<slide_id>` should define:
 
-## Config schema and path conventions
-The current config structure should follow `example.yaml`.
-
-Top-level fields to support:
-- shared defaults such as `pixel_size_um`, `setup`, `seg_merge`, `full_merge`, `instanseg`, `mask_export`, `nimbus`
-
-Per-slide block structure under `slides.<slide_id>` should support:
-
-### Core slide fields
 - `slide_dir`
 - `output_dir`
-- `pixel_size_um`
 - `channel_map_file`
 
-### Optional setup block
-- `setup.channel_patterns`
-- `setup.channel_map_output`
+Important config rules:
 
-### Merge blocks
-- `seg_merge.enabled`
-- `seg_merge.channels`
-- `seg_merge.suffix`
-- `seg_merge.compression`
-- `seg_merge.tile`
-- `seg_merge.bigtiff`
+- reject legacy `seg_merge`
+- reject legacy `nimbus.multislide`
+- keep `nimbus.output_dir` slide-local
+- keep `spatialdata.store_path` slide-local
 
-- `full_merge.enabled`
-- `full_merge.channels`
-- `full_merge.suffix`
-- `full_merge.compression`
-- `full_merge.tile`
-- `full_merge.bigtiff`
+The `setup` block may also define post-generation refinement rules:
 
-### InstanSeg block
-- `instanseg.model`
-- `instanseg.prediction_tag`
-- `instanseg.tile_size`
-- `instanseg.overlap`
-- `instanseg.resolve_cell_and_nucleus`
-- `instanseg.cleanup_fragments`
-- `instanseg.seed_threshold`
-- `instanseg.planes.nuclei_plane`
-- `instanseg.planes.cells_plane`
+- `remove_aliases`: aliases to drop from every generated channel map
+- `rename_aliases`: alias remapping applied after generation
 
-### Mask export block
-- `mask_export.mask_dir`
-- `mask_export.suffix`
-- `mask_export.nuclear_suffix`
-- `mask_export.bigtiff`
-- `mask_export.compression`
-- `mask_export.tile`
+These refinements must be applied before cross-slide alias matching is checked.
 
-### Nimbus block
-- `nimbus.enabled`
-- `nimbus.image_paths`
-- `nimbus.image_globs`
-- `nimbus.image_root`
-- `nimbus.image_extensions`
-- `nimbus.output_dir`
-- `nimbus.channels`
-- `nimbus.channel_chunk_size`
-- `nimbus.join_keys`
-- `nimbus.batch_size`
-- `nimbus.save_predictions`
-- `nimbus.quantile`
-- `nimbus.n_subset`
-- `nimbus.clip_values`
-- `nimbus.multiprocessing`
+## Channel Map Expectations
 
-## Channel map is the primary mapping source
-Use `channel_map_file` as the preferred explicit mapping source.
+`channel_map_file` is the primary explicit mapping source.
 
-The mapping file format should match `channel_map.example.json`, where each item contains:
-- `alias`: short internal alias used in config, for example `R0_DAPI`
-- `path`: actual image path
-- `nimbus_name`: image stem to use for Nimbus-facing naming
+Each entry should contain:
 
-Important:
-- `seg_merge.channels`, `full_merge.channels`, and `nimbus.channels` refer to aliases, not raw file paths.
-- Resolve aliases through the channel map.
-- When available, use `nimbus_name` as the canonical image stem for exported mask filenames and Nimbus matching.
-- Only fall back to `Path(path).stem` if `nimbus_name` is missing.
-- For Nimbus handoff, the exported FOV-level mask such as `SLIDE-0272_whole_cell.tiff` is the primary path that should match a Nimbus FOV, while the channel-stem mask copies are secondary compatibility outputs.
+- `alias`
+- `path`
+- optional `nimbus_name`
 
-## Python API
-Implement notebook-friendly functions such as:
+Important behavior:
+
+- `full_merge.channels`, `instanseg.channels`, and `nimbus.channels` all refer to aliases
+- aliases must resolve through the channel map
+- use `nimbus_name` when present for Nimbus-facing naming and fallback logic
+
+## Python API Surface
+
+Prefer notebook-friendly functions returning small dictionaries.
+
+The main public functions are:
 
 - `load_config(config_path) -> dict`
 - `load_channel_map(channel_map_file) -> list[dict]`
 - `generate_channel_map(source_dir, channel_patterns, output_path) -> list[dict]`
-- `merge_slide_ometiffs(config, slide_id) -> dict`
-- `run_instanseg(config, slide_id) -> dict`
-- `export_masks(config, slide_id, image_paths=None) -> dict`
-- `run_nimbus_chunked(config, slide_id) -> dict`
+- `refine_channel_map(channel_map, *, remove_aliases=None, rename_aliases=None) -> list[dict]`
+- `setup_slide(config, slide_id, ...) -> dict`
+- `setup_slides(config, slide_ids=None, ...) -> dict`
+- `merge_slide_ometiffs(config, slide_id, ...) -> dict`
+- `run_instanseg(config, slide_id, ...) -> dict`
+- `prepare_nimbus_normalization(config, slide_ids=None, *, chunk_indices=None, ...) -> dict`
+- `run_nimbus_chunked(config, slide_id, *, chunk_indices=None, ...) -> dict`
+- `write_spatialdata_base(config, slide_id, ...) -> dict`
+- `finalize_spatialdata(config, slide_id, ...) -> dict`
+- `assemble_spatialdata(config, slide_id, ...) -> dict`
 - `qc_slide(config, slide_id) -> dict`
 - `run_all(config, slide_id) -> dict`
 
-Each function should return a small dictionary of resolved paths and outputs so it is easy to inspect from notebooks.
+## CLI Expectations
 
-## CLI
-Implement CLI entrypoint `mif-pipeline` with subcommands:
+The CLI entrypoint is `mif-pipeline`.
+
+Supported subcommands:
+
 - `run`
 - `setup`
 - `merge`
 - `instanseg`
-- `export`
 - `nimbus`
+- `nimbus-prepare`
+- `assemble-spatialdata`
 - `qc`
 - `dry-run`
 
-All commands should support:
-- `--config`
-- `--slide`
-- `--force` where relevant
+Important:
 
-The CLI should be a thin wrapper over the Python API, not a separate execution path.
+- the shell wrapper stage name is still `spatialdata`
+- the actual CLI subcommand is `assemble-spatialdata`
+- do not rename that wrapper stage casually, because restart workflows now depend on it
 
-The `setup` command should optionally generate a starter channel map from:
-- `slide_dir`
-- `setup.channel_patterns`
-- `setup.channel_map_output`
+## Cluster / Verification Expectations
 
-The implementation already includes notebook-friendly exploration under `prototyping/`.
+This project is developed against cluster data that is usually unavailable in Codex execution.
 
-## Validated constraints
-- InstanSeg Zarr is written at model resolution and may be smaller than the full image canvas.
-- Exported masks must therefore be upscaled back to full `(H, W)`.
-- Label resizing must preserve integer instance IDs:
-  `skimage.transform.resize(..., order=0, preserve_range=True, anti_aliasing=False)`
-- InstanSeg Zarr planes:
-  - nuclei plane = 0
-  - cells plane = 1
+When verifying:
 
-## InstanSeg runner requirements
-Use `Reference/instanseg_WSI_0272_test_v2.ipynb` only as the source of truth for the TiffSlide patch and the label upsampling/export details, not for the execution mode.
+- prefer import checks, config parsing, path resolution, shell syntax checks, and smoke tests
+- do not assume access to `/data1/lowes/...`
+- do not block implementation on full end-to-end execution
 
-Important override:
-- keep the pipeline on forced `medium` processing
-- do not switch the repo to `eval_whole_slide_image(...)`
-- do not make Zarr output the primary pipeline artifact unless I explicitly ask for that refactor
+The runner now logs job context before stage execution, including:
 
-Must include the known TiffSlide patch:
+- hostname
+- SLURM job metadata
+- `CUDA_VISIBLE_DEVICES`
+- `nvidia-smi`
+- a PyTorch CUDA summary
+
+This logging exists because some cluster GPU failures were due to bad or unhealthy allocations rather than slide size or pipeline memory use. Preserve or improve this logging when touching cluster execution.
+
+## Validated Technical Constraints
+
+### InstanSeg
+
+- Keep the TiffSlide patch:
 
 ```python
 from tiffslide import TiffSlide
@@ -224,7 +193,36 @@ import instanseg.inference_class as ic
 ic.TiffSlide = TiffSlide
 ```
 
-## Continuation guidance for future sessions
-- Read `HANDOFF.md` first for the latest project-state summary.
-- Assume the repo may have been moved into the WSL filesystem, so avoid baking repo-local absolute paths into config examples, notebooks, or docs when relative paths are sufficient.
-- Preserve the single-environment execution model unless I explicitly ask for environment wrappers later.
+- Keep the pipeline on forced `medium` processing unless the user explicitly requests a different mode.
+- Do not make Zarr prediction output the primary segmentation artifact unless the user explicitly asks for that refactor.
+- Export masks as full-resolution tiled uint32 TIFFs.
+- When resizing labels, preserve integer instance IDs with nearest-neighbor behavior only.
+
+### Merge writer
+
+- The merged OME-TIFF currently preserves channel names and physical pixel size metadata.
+- It does not currently preserve full microscope instrument metadata.
+- Nimbus may emit warnings about missing `InstrumentID`, detector metadata, microscope type, or objective metadata when reading the merged OME-TIFF.
+- Those warnings have so far been treated as cosmetic unless the user reports downstream functional issues.
+
+### SpatialData / Harpy
+
+- Harpy allocation currently expects translation transforms during aggregation, so scale transforms must be handled carefully around finalize logic.
+- The pipeline writes the base image + labels first, then finalizes the same canonical store with aggregation, optional Nimbus import, and optional shapes.
+- Mask chunking must be aligned to the image chunk grid before Harpy aggregation when using native spatial chunks.
+
+## Documentation Expectations
+
+When the pipeline behavior changes materially:
+
+- update `README.md`
+- update active prototype notebooks under `prototyping/`
+- update this `AGENTS.md`
+- prefer adding a durable markdown explanation instead of relying on notebook memory
+
+## Continuation Guidance
+
+- Read `README.md` for the public workflow.
+- Read `AGENTS.md` for implementation guardrails.
+- Read `METHODS.md` for the rationale behind the current design.
+- Ignore archived files under `old/` and `prototyping/Old/` unless the user explicitly asks to revive them.

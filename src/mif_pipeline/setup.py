@@ -16,6 +16,69 @@ def _target_slide_ids(config: dict[str, Any], slide_ids: Optional[Iterable[str]]
     return ordered
 
 
+def _refinement_config(setup_block: dict[str, Any]) -> tuple[list[str], dict[str, str]]:
+    remove_aliases = [str(alias) for alias in (setup_block.get("remove_aliases") or [])]
+    rename_aliases = {
+        str(source): str(target)
+        for source, target in (setup_block.get("rename_aliases") or {}).items()
+    }
+    return remove_aliases, rename_aliases
+
+
+def refine_channel_map(
+    channel_map: list[dict[str, Any]],
+    *,
+    remove_aliases: Optional[Iterable[str]] = None,
+    rename_aliases: Optional[dict[str, str]] = None,
+) -> list[dict[str, Any]]:
+    remove_set = {str(alias) for alias in (remove_aliases or [])}
+    rename_lookup = {str(source): str(target) for source, target in (rename_aliases or {}).items()}
+
+    duplicate_targets = sorted({target for target in rename_lookup.values() if list(rename_lookup.values()).count(target) > 1})
+    if duplicate_targets:
+        raise ValueError(
+            "Refined channel map would contain duplicate rename targets: "
+            + ", ".join(duplicate_targets)
+        )
+
+    refined: list[dict[str, Any]] = []
+    seen_aliases: set[str] = set()
+    for entry in channel_map:
+        alias = str(entry["alias"])
+        if alias in remove_set:
+            continue
+
+        new_alias = rename_lookup.get(alias, alias)
+        if new_alias in remove_set:
+            continue
+        if not new_alias:
+            raise ValueError("Refined channel map contains an empty alias after rename.")
+        if new_alias in seen_aliases:
+            raise ValueError(
+                f"Refined channel map would contain duplicate alias {new_alias!r}."
+            )
+        updated = dict(entry)
+        updated["alias"] = new_alias
+        refined.append(updated)
+        seen_aliases.add(new_alias)
+
+    missing_remove = sorted(remove_set - {str(entry["alias"]) for entry in channel_map})
+    if missing_remove:
+        raise KeyError(
+            "setup.remove_aliases contains aliases not present in the generated channel map: "
+            + ", ".join(missing_remove)
+        )
+
+    missing_rename = sorted(set(rename_lookup) - {str(entry["alias"]) for entry in channel_map})
+    if missing_rename:
+        raise KeyError(
+            "setup.rename_aliases contains source aliases not present in the generated channel map: "
+            + ", ".join(missing_rename)
+        )
+
+    return refined
+
+
 def _plan_setup_slide(config: dict[str, Any], slide_id: str) -> dict[str, Any]:
     slide = get_slide_config(config, slide_id)
     setup_block = slide.get("setup")
@@ -26,11 +89,17 @@ def _plan_setup_slide(config: dict[str, Any], slide_id: str) -> dict[str, Any]:
     output_path = Path(setup_block["channel_map_output"])
     patterns = list(setup_block.get("channel_patterns") or ["*.tif"])
     include_round_in_alias = bool(setup_block.get("include_round_in_alias", True))
-    channel_map = generate_channel_map(
+    raw_channel_map = generate_channel_map(
         source_dir,
         patterns,
         output_path=None,
         include_round_in_alias=include_round_in_alias,
+    )
+    remove_aliases, rename_aliases = _refinement_config(setup_block)
+    channel_map = refine_channel_map(
+        raw_channel_map,
+        remove_aliases=remove_aliases,
+        rename_aliases=rename_aliases,
     )
 
     return {
@@ -39,6 +108,9 @@ def _plan_setup_slide(config: dict[str, Any], slide_id: str) -> dict[str, Any]:
         "channel_map_output": str(output_path),
         "channel_patterns": patterns,
         "include_round_in_alias": include_round_in_alias,
+        "remove_aliases": remove_aliases,
+        "rename_aliases": rename_aliases,
+        "raw_channel_map": raw_channel_map,
         "channel_map": channel_map,
         "aliases": [entry["alias"] for entry in channel_map],
     }
@@ -114,6 +186,9 @@ def setup_slides(
             "channel_map_output": plan["channel_map_output"],
             "channel_patterns": list(plan["channel_patterns"]),
             "include_round_in_alias": plan["include_round_in_alias"],
+            "remove_aliases": list(plan["remove_aliases"]),
+            "rename_aliases": dict(plan["rename_aliases"]),
+            "raw_channel_count": len(plan["raw_channel_map"]),
             "channel_count": len(plan["channel_map"]),
             "aliases": list(plan["aliases"]),
         }

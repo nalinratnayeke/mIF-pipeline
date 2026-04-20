@@ -31,6 +31,8 @@ Active debugging notebooks live under [prototyping](/home/ratnayn/codex/mIF-pipe
 
 Reference implementations and external snapshots live under [Reference](/home/ratnayn/codex/mIF-pipeline/Reference).
 
+For a fuller rationale and a paper-style description of the implemented workflow, see [METHODS.md](/home/ratnayn/codex/mIF-pipeline/METHODS.md).
+
 ## Config
 
 See [example.yaml](/home/ratnayn/codex/mIF-pipeline/example.yaml) for the current schema.
@@ -50,6 +52,11 @@ The most important per-slide fields are:
 - `output_dir`
 - `channel_map_file`
 - `pixel_size_um`
+
+The `setup` block also supports optional post-generation refinement rules that are applied consistently across all selected slides before alias matching is checked:
+
+- `remove_aliases`
+- `rename_aliases`
 
 ## Python API
 
@@ -72,6 +79,14 @@ Each function returns a small inspectable dictionary rather than a large in-memo
 ## CLI
 
 The CLI entrypoint is `mif-pipeline`.
+
+If the repo has not been installed into the active environment yet, invoke the CLI from the repo root with:
+
+```bash
+PYTHONPATH=src python -m mif_pipeline.cli --help
+```
+
+After `pip install -e .`, the shorter `mif-pipeline ...` commands will be available.
 
 Common commands:
 
@@ -131,6 +146,23 @@ SpatialData assembly is intentionally separate from the InstanSeg/Nimbus environ
 `assemble_spatialdata(...)` remains available as a convenience wrapper when you do not need to inspect the base store separately.
 
 The final store is the only canonical SpatialData artifact for a slide. During finalization, tables and optional shapes are appended into that same slide-local store.
+
+## Design Notes
+
+The current pipeline shape reflects a few deliberate choices:
+
+- `full_merge.ome.tif` is the only persisted merged image artifact; `seg_merge` was removed for simplicity and storage efficiency.
+- `nimbus-prepare` replaced the older shared multislide Nimbus execution/output model so shared normalization can coexist with per-slide execution and per-slide recovery.
+- SpatialData assembly uses the validated `tiffslide`-based import path for the merged OME-TIFF because it behaved more reliably on large images than earlier alternatives.
+- InstanSeg remains a direct medium-mode stage rather than being folded into the SpatialData stage.
+- The shell wrapper stage name is `spatialdata`, but the CLI subcommand is `assemble-spatialdata`.
+
+The detailed rationale behind these decisions is documented in [METHODS.md](/home/ratnayn/codex/mIF-pipeline/METHODS.md).
+
+## Operational Notes
+
+- The merged OME-TIFF preserves channel names and physical pixel size metadata, but it does not currently reconstruct a full microscope `Instrument` block. Nimbus may therefore warn about missing instrument, detector, microscope-type, or objective metadata. These warnings have so far been treated as cosmetic unless downstream behavior is affected.
+- The per-slide runner logs SLURM, CUDA, `nvidia-smi`, and PyTorch GPU context at job start. This was added because some InstanSeg failures on the cluster were caused by unhealthy or unavailable GPU allocations rather than by true image-size overload.
 
 ## Testing
 

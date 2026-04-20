@@ -11,7 +11,7 @@ from .merge_ometiff import merge_slide_ometiffs
 from .nimbus_runner import prepare_nimbus_normalization, run_nimbus_chunked
 from .pipeline import run_all
 from .qc import qc_slide
-from .setup import setup_slide, setup_slides
+from .setup import refine_channel_map, setup_slide, setup_slides
 from .spatialdata_builder import (
     assemble_spatialdata,
     build_spatialdata,
@@ -32,6 +32,7 @@ __all__ = [
     "merge_slide_ometiffs",
     "prepare_nimbus_normalization",
     "qc_slide",
+    "refine_channel_map",
     "run_all",
     "run_instanseg",
     "run_nimbus_chunked",

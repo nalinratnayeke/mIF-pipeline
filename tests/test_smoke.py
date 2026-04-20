@@ -32,7 +32,7 @@ from mif_pipeline.nimbus_runner import (
     run_nimbus_chunked,
 )
 from mif_pipeline.pipeline import run_all
-from mif_pipeline.setup import setup_slide, setup_slides
+from mif_pipeline.setup import refine_channel_map, setup_slide, setup_slides
 import mif_pipeline.spatialdata_builder as spatialdata_builder_module
 from mif_pipeline.spatialdata_builder import build_spatialdata, finalize_spatialdata, write_spatialdata_base
 
@@ -531,6 +531,51 @@ def test_generate_channel_map_preserves_non_dapi_autofluorescence_marker(tmp_pat
     assert [entry["alias"] for entry in generated] == ["R3_FITC_AF"]
 
 
+def test_refine_channel_map_can_remove_and_rename_aliases():
+    channel_map = [
+        {"alias": "R0_DAPI", "path": "/tmp/a.tif", "nimbus_name": "a"},
+        {"alias": "R0_PANCK", "path": "/tmp/b.tif", "nimbus_name": "b"},
+        {"alias": "R0_CD45", "path": "/tmp/c.tif", "nimbus_name": "c"},
+    ]
+
+    refined = refine_channel_map(
+        channel_map,
+        remove_aliases=["R0_CD45"],
+        rename_aliases={"R0_PANCK": "PANCK"},
+    )
+
+    assert [entry["alias"] for entry in refined] == ["R0_DAPI", "PANCK"]
+    assert refined[1]["path"] == "/tmp/b.tif"
+
+
+def test_refine_channel_map_rejects_missing_remove_alias():
+    channel_map = [{"alias": "R0_DAPI", "path": "/tmp/a.tif", "nimbus_name": "a"}]
+
+    try:
+        refine_channel_map(channel_map, remove_aliases=["R0_CD45"])
+    except KeyError as exc:
+        assert "remove_aliases" in str(exc)
+    else:
+        raise AssertionError("Expected missing remove aliases to raise KeyError.")
+
+
+def test_refine_channel_map_rejects_duplicate_targets():
+    channel_map = [
+        {"alias": "R0_DAPI", "path": "/tmp/a.tif", "nimbus_name": "a"},
+        {"alias": "R0_PANCK", "path": "/tmp/b.tif", "nimbus_name": "b"},
+    ]
+
+    try:
+        refine_channel_map(
+            channel_map,
+            rename_aliases={"R0_DAPI": "MARKER", "R0_PANCK": "MARKER"},
+        )
+    except ValueError as exc:
+        assert "duplicate rename targets" in str(exc)
+    else:
+        raise AssertionError("Expected duplicate rename targets to raise ValueError.")
+
+
 def _write_test_pyramidal_ome(path: Path, level0: np.ndarray) -> None:
     level1 = _downsample2x_mean(level0)
     level2 = _downsample2x_mean(level1)
@@ -780,6 +825,27 @@ def test_setup_slides_generates_all_matching_channel_maps(tmp_path: Path):
         assert output_path.exists()
         channel_map = json.loads(output_path.read_text(encoding="utf-8"))
         assert [entry["alias"] for entry in channel_map] == ["R0_DAPI", "R0_PANCK"]
+
+
+def test_setup_slides_applies_shared_refinements_before_matching(tmp_path: Path):
+    config_path = write_multislide_config(tmp_path)
+    config = load_config(config_path)
+    config["setup"]["remove_aliases"] = ["R0_PANCK"]
+    config["setup"]["rename_aliases"] = {"R0_DAPI": "DAPI"}
+    for slide_id in ("SLIDE-A", "SLIDE-B"):
+        output_path = tmp_path / "work" / slide_id / "channel_map.generated.json"
+        if output_path.exists():
+            output_path.unlink()
+
+    result = setup_slides(config)
+
+    assert result["channel_aliases"] == ["DAPI"]
+    for slide in result["slides"]:
+        assert slide["aliases"] == ["DAPI"]
+        assert slide["raw_channel_count"] == 2
+        output_path = Path(slide["channel_map_output"])
+        written = json.loads(output_path.read_text(encoding="utf-8"))
+        assert [entry["alias"] for entry in written] == ["DAPI"]
 
 
 def test_setup_slides_dry_run_validates_without_writing(tmp_path: Path):
