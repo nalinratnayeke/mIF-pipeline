@@ -1263,6 +1263,21 @@ def test_get_slide_config_resolves_spatialdata_store_path(tmp_path: Path):
     assert slide["spatialdata"]["store_path"] == str(
         tmp_path / "work" / "SLIDE-0272" / "SLIDE-0272_spatialdata.sdata.zarr"
     )
+    assert slide["spatialdata"]["aggregation_mode"] == "mean"
+
+
+def test_load_config_rejects_invalid_spatialdata_aggregation_mode(tmp_path: Path):
+    config_path = write_config(tmp_path)
+    config_data = yaml.safe_load(config_path.read_text(encoding="utf-8"))
+    config_data["slides"]["SLIDE-0272"]["spatialdata"]["aggregation_mode"] = "median"
+    config_path.write_text(yaml.safe_dump(config_data), encoding="utf-8")
+
+    try:
+        load_config(config_path)
+    except ValueError as exc:
+        assert "aggregation_mode" in str(exc)
+    else:
+        raise AssertionError("Expected invalid spatialdata aggregation_mode to raise ValueError.")
 
 
 def test_get_slide_config_rejects_legacy_spatialdata_base_store_settings(tmp_path: Path):
@@ -1299,6 +1314,7 @@ def test_spatialdata_dry_run_uses_all_channels_by_default(tmp_path: Path):
     assert result["image_aliases"] == ["R0_DAPI", "R0_PANCK"]
     assert result["planned_tables"] == ["agg_cell_labels", "agg_nuclear_labels", "nimbus_table"]
     assert result["aggregate"] is True
+    assert result["aggregation_mode"] == "mean"
     assert result["aggregate_cell_labels"] is True
     assert result["aggregate_nuclear_labels"] is True
     assert result["derive_shapes"] is False
@@ -1502,6 +1518,7 @@ def _install_spatialdata_assembly_stubs(monkeypatch):
                 overwrite,
             ):
                 assert chunks is None
+                assert mode in {"mean", "sum"}
                 label_payload = np.asarray(sdata.labels[labels_layer].payload)
                 labels = sorted(int(value) for value in np.unique(label_payload) if value > 0)
                 obs = pd.DataFrame({"instance_id": [str(label) for label in labels]})
@@ -1615,6 +1632,9 @@ def test_build_spatialdata_execution_with_stubs(monkeypatch, tmp_path: Path):
         "agg_nuclear_labels",
         "nimbus_table",
     ]
+    assert result["aggregation_mode"] == "mean"
+    assert result["aggregate_tables"][0]["aggregation_mode"] == "mean"
+    assert result["aggregate_tables"][1]["aggregation_mode"] == "mean"
     assert result["aggregate_tables"][0]["features"] == ["R0_DAPI", "R0_PANCK"]
     assert result["aggregate_tables"][1]["features"] == ["R0_DAPI", "R0_PANCK"]
     assert result["sdata"].tables["nimbus_table"].var_names.tolist() == ["R0_DAPI", "R0_PANCK"]
@@ -1692,6 +1712,38 @@ def test_build_spatialdata_execution_can_skip_nuclear_aggregation(monkeypatch, t
     assert result["aggregate_nuclear_labels"] is False
     assert result["tables"] == ["agg_cell_labels", "nimbus_table"]
     assert [entry["name"] for entry in result["aggregate_tables"]] == ["agg_cell_labels"]
+    assert result["aggregate_tables"][0]["aggregation_mode"] == "mean"
+
+
+def test_build_spatialdata_execution_can_use_sum_aggregation(monkeypatch, tmp_path: Path):
+    import pandas as pd
+
+    config_path = write_config(tmp_path)
+    config = load_config(config_path)
+    config["slides"]["SLIDE-0272"]["spatialdata"]["aggregation_mode"] = "sum"
+    slide = get_slide_config(config, "SLIDE-0272")
+    paths = spatialdata_builder_module._spatialdata_paths(slide)
+
+    paths["full_merge_path"].write_bytes(b"fake")
+    paths["cell_mask_path"].parent.mkdir(parents=True, exist_ok=True)
+    tf.imwrite(paths["cell_mask_path"], np.array([[0, 1], [2, 2]], dtype=np.uint32))
+    tf.imwrite(paths["nuclear_mask_path"], np.array([[0, 1], [0, 2]], dtype=np.uint32))
+    paths["nimbus_table_path"].parent.mkdir(parents=True, exist_ok=True)
+    pd.DataFrame(
+        {
+            "cell_id": [1, 2],
+            "fov": ["SLIDE-0272", "SLIDE-0272"],
+            "slide_id": ["SLIDE-0272", "SLIDE-0272"],
+            "SLIDE-0272_0.0.2_R000_DAPI_F_Tiled": [0.1, 0.2],
+            "SLIDE-0272_0.0.2_R001_PANCK_F_Tiled": [0.3, 0.4],
+        }
+    ).to_csv(paths["nimbus_table_path"], index=False)
+
+    _install_spatialdata_assembly_stubs(monkeypatch)
+    result = build_spatialdata(config, "SLIDE-0272", dry_run=False, return_sdata=True)
+
+    assert result["aggregation_mode"] == "sum"
+    assert [entry["aggregation_mode"] for entry in result["aggregate_tables"]] == ["sum", "sum"]
 
 
 def test_build_spatialdata_execution_can_skip_missing_nimbus(monkeypatch, tmp_path: Path):

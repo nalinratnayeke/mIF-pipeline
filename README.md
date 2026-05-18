@@ -45,6 +45,7 @@ Important points:
 - `nimbus.output_dir` is always slide-local.
 - `nimbus.multislide` is no longer supported.
 - `spatialdata` writes the final canonical slide-local SpatialData store.
+- `spatialdata.aggregation_mode` controls raster intensity allocation and defaults to `mean`.
 
 The most important per-slide fields are:
 
@@ -146,6 +147,8 @@ SpatialData assembly is intentionally separate from the InstanSeg/Nimbus environ
 `assemble_spatialdata(...)` remains available as a convenience wrapper when you do not need to inspect the base store separately.
 
 The final store is the only canonical SpatialData artifact for a slide. During finalization, tables and optional shapes are appended into that same slide-local store.
+
+When aggregation is enabled, the default raster intensity statistic is `mean`. Set `spatialdata.aggregation_mode: sum` if you need the older sum-based behavior.
 
 ## Design Notes
 

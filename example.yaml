@@ -63,6 +63,7 @@ spatialdata:
   enabled: false
   suffix: _spatialdata.sdata.zarr
   aggregate: true
+  aggregation_mode: mean
   aggregate_cell_labels: true
   aggregate_nuclear_labels: true
   run_on_gpu: false

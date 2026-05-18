@@ -10,6 +10,7 @@ from .config import (
     ensure_config,
     get_slide_config,
     load_channel_map,
+    normalize_spatialdata_aggregation_mode,
     resolve_block_aliases,
     resolve_channel_entries,
 )
@@ -144,6 +145,10 @@ def _aggregate_nuclear_labels(spatialdata_block: dict[str, Any]) -> bool:
     return bool(spatialdata_block.get("aggregate_nuclear_labels", True))
 
 
+def _aggregation_mode(spatialdata_block: dict[str, Any]) -> str:
+    return normalize_spatialdata_aggregation_mode(spatialdata_block.get("aggregation_mode"))
+
+
 def _derive_shapes(spatialdata_block: dict[str, Any]) -> bool:
     return bool(spatialdata_block.get("derive_shapes", False))
 
@@ -200,8 +205,11 @@ def _strip_channel_prefix(name: str) -> str:
     return name[len("channel_") :] if name.startswith("channel_") else name
 
 
-def _strip_mean_suffix(name: str) -> str:
-    return name[: -len("_mean")] if name.endswith("_mean") else name
+def _strip_aggregation_suffix(name: str) -> str:
+    for suffix in ("_mean", "_sum"):
+        if name.endswith(suffix):
+            return name[: -len(suffix)]
+    return name
 
 
 def _channel_alias_lookup(config: dict[str, Any], slide_id: str) -> dict[str, str]:
@@ -213,14 +221,14 @@ def _channel_alias_lookup(config: dict[str, Any], slide_id: str) -> dict[str, st
         canonical = canonical_nimbus_name(entry)
         lookup[alias] = alias
         lookup[canonical] = alias
-        lookup[_strip_mean_suffix(alias)] = alias
-        lookup[_strip_mean_suffix(canonical)] = alias
+        lookup[_strip_aggregation_suffix(alias)] = alias
+        lookup[_strip_aggregation_suffix(canonical)] = alias
     return lookup
 
 
 def _normalize_feature_name(name: str, alias_lookup: dict[str, str]) -> str:
     stripped = _strip_channel_prefix(str(name))
-    base = _strip_mean_suffix(stripped)
+    base = _strip_aggregation_suffix(stripped)
     return alias_lookup.get(base, base)
 
 
@@ -253,6 +261,7 @@ def _plan_result(config: dict[str, Any], slide_id: str) -> dict[str, Any]:
     paths = _spatialdata_paths(slide)
     load_nimbus = _load_nimbus(spatialdata_block, slide)
     aggregate = _aggregate_enabled(spatialdata_block)
+    aggregation_mode = _aggregation_mode(spatialdata_block)
     aggregate_cell_labels = _aggregate_cell_labels(spatialdata_block)
     aggregate_nuclear_labels = _aggregate_nuclear_labels(spatialdata_block)
     run_on_gpu = _aggregate_run_on_gpu(spatialdata_block)
@@ -281,6 +290,7 @@ def _plan_result(config: dict[str, Any], slide_id: str) -> dict[str, Any]:
         "image_aliases": _full_merge_aliases(config, slide_id),
         "load_nimbus": load_nimbus,
         "aggregate": aggregate,
+        "aggregation_mode": aggregation_mode,
         "aggregate_cell_labels": aggregate_cell_labels,
         "aggregate_nuclear_labels": aggregate_nuclear_labels,
         "run_on_gpu": run_on_gpu,
@@ -500,6 +510,7 @@ def _allocate_label_intensity(
     sdata: Any,
     label_name: str,
     table_name: str,
+    aggregation_mode: str,
     run_on_gpu: bool,
 ) -> tuple[Any, dict[str, Any]]:
     size_key = "cell_size" if label_name == "cell_labels" else "nucleus_size"
@@ -508,7 +519,7 @@ def _allocate_label_intensity(
         img_layer="full_image",
         labels_layer=label_name,
         output_layer=table_name,
-        mode="sum",
+        mode=aggregation_mode,
         obs_stats=["count"],
         instance_size_key=size_key,
         chunks=None,
@@ -523,6 +534,7 @@ def _allocate_label_intensity(
         "labels_layer": label_name,
         "row_count": int(table.n_obs),
         "feature_count": int(table.n_vars),
+        "aggregation_mode": aggregation_mode,
         "run_on_gpu": bool(run_on_gpu),
         "chunks": None,
     }
@@ -806,6 +818,7 @@ def finalize_spatialdata(
 
     pixel_size_um = float(slide["pixel_size_um"])
     aggregate = _aggregate_enabled(spatialdata_block)
+    aggregation_mode = _aggregation_mode(spatialdata_block)
     aggregate_cell_labels = _aggregate_cell_labels(spatialdata_block)
     aggregate_nuclear_labels = _aggregate_nuclear_labels(spatialdata_block)
     run_on_gpu = _aggregate_run_on_gpu(spatialdata_block)
@@ -868,6 +881,7 @@ def finalize_spatialdata(
                 sdata=sdata,
                 label_name=label_name,
                 table_name=table_name,
+                aggregation_mode=aggregation_mode,
                 run_on_gpu=run_on_gpu,
             )
             sdata.tables[table_name] = _normalize_table_features(
@@ -935,6 +949,7 @@ def finalize_spatialdata(
         "shapes": list(sdata.shapes.keys()),
         "tables": list(sdata.tables.keys()),
         "aggregate": aggregate,
+        "aggregation_mode": aggregation_mode,
         "aggregate_cell_labels": aggregate_cell_labels,
         "aggregate_nuclear_labels": aggregate_nuclear_labels,
         "run_on_gpu": run_on_gpu,

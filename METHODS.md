@@ -232,6 +232,8 @@ Intensity allocation is performed against raster labels, with optional aggregati
 - cell labels
 - nuclear labels
 
+The pipeline exposes the Harpy aggregation statistic as `spatialdata.aggregation_mode`, with `mean` as the default and `sum` retained as an explicit opt-in for workflows that still want area-scaled totals.
+
 Polygon generation is optional and is treated as a derived artifact rather than the source of truth. Native SpatialData vectorization was retained as the default path after comparison against alternative approaches because it preserved instance correspondence more reliably in the tested workflow.
 
 `harpy` is the key package for raster aggregation in this stage, while `spatialdata` provides the parsing and persistence model for the resulting image, label, shape, and table elements.

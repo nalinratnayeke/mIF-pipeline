@@ -50,6 +50,7 @@ These are now deliberate and should be preserved unless the user asks for a chan
 - The canonical deliverable is the final slide-local SpatialData store.
 - SpatialData assembly runs in a modern Harpy + SpatialData environment, separate from the InstanSeg/Nimbus environment.
 - The image import path should use the working `tiffslide -> zarr -> xarray -> DataTree -> SpatialData` approach, not the older direct `Image2DModel.parse(...)` path for the merged OME-TIFF.
+- Raster intensity aggregation is configurable through `spatialdata.aggregation_mode` and defaults to `mean`.
 - Raster labels are the segmentation source of truth.
 - Shapes are optional derived artifacts.
 
@@ -93,6 +94,7 @@ Important config rules:
 - reject legacy `nimbus.multislide`
 - keep `nimbus.output_dir` slide-local
 - keep `spatialdata.store_path` slide-local
+- validate `spatialdata.aggregation_mode` against the supported `mean` / `sum` options
 
 The `setup` block may also define post-generation refinement rules:
 

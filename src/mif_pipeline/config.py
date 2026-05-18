@@ -13,6 +13,7 @@ IMAGE_SUFFIXES = (".ome.tiff", ".ome.tif", ".tiff", ".tif")
 ROUND_RE = re.compile(r"_R(\d{3})_")
 VERSION_ROUND_RE = re.compile(r"_(\d+)(?:\.\d+){1,2}_R\d{3}_")
 COMMON_DYES = {"DAPI", "FITC", "TRITC", "CY3", "CY5", "CY7", "AF488", "AF555", "AF647", "AF750"}
+SPATIALDATA_AGGREGATION_MODES = ("mean", "sum")
 SLIDE_DEFAULT_KEYS = (
     "pixel_size_um",
     "setup",
@@ -41,6 +42,7 @@ def load_config(config_path: Union[str, Path]) -> dict[str, Any]:
             "Legacy 'seg_merge' config is no longer supported. "
             "Keep only 'full_merge' and move the segmentation channel list to 'instanseg.channels'."
         )
+    _validate_spatialdata_block(config.get("spatialdata"))
     if isinstance(config.get("nimbus"), dict) and "multislide" in config["nimbus"]:
         raise ValueError(
             "Legacy 'nimbus.multislide' config is no longer supported. "
@@ -59,6 +61,8 @@ def load_config(config_path: Union[str, Path]) -> dict[str, Any]:
                 "Use slide-local 'nimbus.output_dir' only, run 'nimbus-prepare' across the selected slide set, "
                 "and let each slide job run 'nimbus' independently."
             )
+        if isinstance(slide, dict):
+            _validate_spatialdata_block(slide.get("spatialdata"))
 
     config["_meta"] = {
         "config_path": str(path),
@@ -71,6 +75,26 @@ def ensure_config(config_or_path: Union[dict[str, Any], str, Path]) -> dict[str,
     if isinstance(config_or_path, dict):
         return config_or_path
     return load_config(config_or_path)
+
+
+def normalize_spatialdata_aggregation_mode(value: Any) -> str:
+    if value is None:
+        return "mean"
+    normalized = str(value).strip().lower()
+    if normalized not in SPATIALDATA_AGGREGATION_MODES:
+        allowed = ", ".join(repr(mode) for mode in SPATIALDATA_AGGREGATION_MODES)
+        raise ValueError(
+            f"SpatialData aggregation_mode must be one of {allowed}; got {value!r}."
+        )
+    return normalized
+
+
+def _validate_spatialdata_block(block: Any) -> None:
+    if not isinstance(block, dict):
+        return
+    block["aggregation_mode"] = normalize_spatialdata_aggregation_mode(
+        block.get("aggregation_mode")
+    )
 
 
 def _deep_merge(base: Any, override: Any) -> Any:
@@ -248,6 +272,7 @@ def get_slide_config(config: dict[str, Any], slide_id: str) -> dict[str, Any]:
 
     spatialdata = resolved.get("spatialdata")
     if isinstance(spatialdata, dict):
+        _validate_spatialdata_block(spatialdata)
         suffix = spatialdata.get("suffix")
         legacy_store_path = spatialdata.get("store_path")
         if suffix is not None and legacy_store_path is not None:
