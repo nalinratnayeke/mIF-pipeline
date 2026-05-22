@@ -120,6 +120,9 @@ def write_config(tmp_path: Path) -> Path:
                     "aggregate": True,
                     "aggregate_cell_labels": True,
                     "aggregate_nuclear_labels": True,
+                    "derive_cytoplasm_labels": False,
+                    "cytoplasm_subtraction_mode": "any_nuclear_overlap",
+                    "aggregate_cytoplasm_labels": False,
                     "run_on_gpu": False,
                     "derive_shapes": False,
                     "check_label_overlap": True,
@@ -251,6 +254,9 @@ def write_multislide_config(tmp_path: Path, *, mismatch: bool = False) -> Path:
             "aggregate": True,
             "aggregate_cell_labels": True,
             "aggregate_nuclear_labels": True,
+            "derive_cytoplasm_labels": False,
+            "cytoplasm_subtraction_mode": "any_nuclear_overlap",
+            "aggregate_cytoplasm_labels": False,
             "derive_shapes": False,
             "check_label_overlap": True,
             "load_nimbus": True,
@@ -1317,6 +1323,9 @@ def test_spatialdata_dry_run_uses_all_channels_by_default(tmp_path: Path):
     assert result["aggregation_mode"] == "mean"
     assert result["aggregate_cell_labels"] is True
     assert result["aggregate_nuclear_labels"] is True
+    assert result["derive_cytoplasm_labels"] is False
+    assert result["aggregate_cytoplasm_labels"] is False
+    assert result["cytoplasm_subtraction_mode"] == "any_nuclear_overlap"
     assert result["derive_shapes"] is False
     assert result["check_label_overlap"] is True
     assert result["load_nimbus"] is True
@@ -1364,6 +1373,28 @@ def test_spatialdata_dry_run_can_plan_derived_shapes(tmp_path: Path):
 
     assert result["planned_shapes"] == ["cell_boundaries", "nuclear_boundaries"]
     assert result["derive_shapes"] is True
+
+
+def test_spatialdata_dry_run_can_plan_cytoplasm_labels_shapes_and_table(tmp_path: Path):
+    config_path = write_config(tmp_path)
+    config = load_config(config_path)
+    spatialdata = config["slides"]["SLIDE-0272"]["spatialdata"]
+    spatialdata["derive_cytoplasm_labels"] = True
+    spatialdata["aggregate_cytoplasm_labels"] = True
+    spatialdata["derive_shapes"] = True
+
+    result = build_spatialdata(config, "SLIDE-0272", dry_run=True)
+
+    assert result["planned_labels"] == ["cell_labels", "nuclear_labels", "cytoplasm_labels"]
+    assert result["planned_shapes"] == ["cell_boundaries", "nuclear_boundaries", "cytoplasm_boundaries"]
+    assert result["planned_tables"] == [
+        "agg_cell_labels",
+        "agg_nuclear_labels",
+        "agg_cytoplasm_labels",
+        "nimbus_table",
+    ]
+    assert result["derive_cytoplasm_labels"] is True
+    assert result["aggregate_cytoplasm_labels"] is True
 
 
 def test_dry_run_pipeline_stops_before_spatialdata(tmp_path: Path):
@@ -1495,12 +1526,21 @@ def _install_spatialdata_assembly_stubs(monkeypatch):
             self.var = var
 
     class DummySpatialdataModule:
-        @staticmethod
-        def to_polygons(label_element):
-            labels = sorted(int(value) for value in np.unique(label_element.payload) if value > 0)
-            return pd.DataFrame({"label": labels, "geometry": [f"geom_{label}" for label in labels]})
+        pass
 
     class DummyHarpy:
+        class shape:
+            @staticmethod
+            def vectorize(sdata, labels_layer, output_layer, instance_key="cell_ID", overwrite=False):
+                assert overwrite is True
+                assert instance_key == "cell_ID"
+                label_payload = np.asarray(sdata.labels[labels_layer].payload)
+                labels = sorted(int(value) for value in np.unique(label_payload) if value > 0)
+                frame = pd.DataFrame({"geometry": [f"geom_{label}" for label in labels]})
+                frame.index = pd.Index(labels, name=instance_key)
+                sdata.shapes[output_layer] = frame
+                return sdata
+
         class tb:
             @staticmethod
             def allocate_intensity(
@@ -1519,6 +1559,7 @@ def _install_spatialdata_assembly_stubs(monkeypatch):
             ):
                 assert chunks is None
                 assert mode in {"mean", "sum"}
+                assert instance_size_key in {"cell_size", "nucleus_size", "cytoplasm_size"}
                 label_payload = np.asarray(sdata.labels[labels_layer].payload)
                 labels = sorted(int(value) for value in np.unique(label_payload) if value > 0)
                 obs = pd.DataFrame({"instance_id": [str(label) for label in labels]})
@@ -1592,6 +1633,55 @@ def test_build_spatialdata_import_guard(monkeypatch, tmp_path: Path):
         raise AssertionError("Expected missing harpy import to raise ImportError.")
 
 
+def test_harpy_vectorization_preserves_noncontiguous_label_ids():
+    import pandas as pd
+
+    class DummyLabel:
+        payload = np.array([[0, 1], [5, 9449]], dtype=np.uint32)
+
+    class DummySpatialData:
+        def __init__(self):
+            self.labels = {"labels": DummyLabel()}
+            self.shapes = {}
+
+        def __setitem__(self, key, value):
+            self.shapes[key] = value
+
+    class DummyHarpy:
+        class shape:
+            @staticmethod
+            def vectorize(sdata, labels_layer, output_layer, instance_key="cell_ID", overwrite=False):
+                assert labels_layer == "labels"
+                assert output_layer == "boundaries"
+                assert instance_key == "cell_ID"
+                assert overwrite is True
+                labels = sorted(int(value) for value in np.unique(sdata.labels[labels_layer].payload) if value > 0)
+                frame = pd.DataFrame({"geometry": [f"geom_{label}" for label in labels]})
+                frame.index = pd.Index(labels, name=instance_key)
+                sdata.shapes[output_layer] = frame
+                return sdata
+
+    class DummyShapesModel:
+        @staticmethod
+        def parse(frame):
+            return frame.copy()
+
+    sdata = DummySpatialData()
+    result = spatialdata_builder_module._vectorize_label_layer(
+        sdata,
+        hp=DummyHarpy,
+        label_name="labels",
+        shape_name="boundaries",
+        ShapesModel=DummyShapesModel,
+    )
+
+    frame = sdata.shapes["boundaries"]
+    assert result == {"name": "boundaries", "backend": "harpy", "row_count": 3}
+    assert list(frame["cell_id"]) == [1, 5, 9449]
+    assert list(frame["instance_id"]) == ["1", "5", "9449"]
+    assert list(frame.index) == ["1", "5", "9449"]
+
+
 def test_build_spatialdata_execution_with_stubs(monkeypatch, tmp_path: Path):
     import pandas as pd
 
@@ -1625,6 +1715,14 @@ def test_build_spatialdata_execution_with_stubs(monkeypatch, tmp_path: Path):
     assert result["labels"] == ["cell_labels", "nuclear_labels"]
     assert result["shapes"] == ["cell_boundaries", "nuclear_boundaries"]
     assert result["tables"] == ["agg_cell_labels", "agg_nuclear_labels", "nimbus_table"]
+    assert result["vectorization"] == [
+        {"name": "cell_boundaries", "backend": "harpy", "row_count": 2},
+        {"name": "nuclear_boundaries", "backend": "harpy", "row_count": 2},
+    ]
+    cell_shapes = result["sdata"].shapes["cell_boundaries"].payload
+    assert list(cell_shapes["cell_id"]) == [1, 2]
+    assert list(cell_shapes["instance_id"]) == ["1", "2"]
+    assert list(cell_shapes.index) == ["1", "2"]
     assert result["written_elements"] == [
         "cell_boundaries",
         "nuclear_boundaries",
@@ -1667,6 +1765,37 @@ def test_write_spatialdata_base_execution_with_stubs(monkeypatch, tmp_path: Path
     assert Path(result["store_path"]).exists()
     assert result["sdata"].tables == {}
     assert result["sdata"].shapes == {}
+
+
+def test_write_spatialdata_base_can_derive_cytoplasm_labels(monkeypatch, tmp_path: Path):
+    config_path = write_config(tmp_path)
+    config = load_config(config_path)
+    config["slides"]["SLIDE-0272"]["spatialdata"]["derive_cytoplasm_labels"] = True
+    slide = get_slide_config(config, "SLIDE-0272")
+    paths = spatialdata_builder_module._spatialdata_paths(slide)
+
+    paths["full_merge_path"].write_bytes(b"fake")
+    paths["cell_mask_path"].parent.mkdir(parents=True, exist_ok=True)
+    tf.imwrite(paths["cell_mask_path"], np.array([[0, 1], [2, 2]], dtype=np.uint32))
+    tf.imwrite(paths["nuclear_mask_path"], np.array([[0, 1], [0, 2]], dtype=np.uint32))
+
+    _install_spatialdata_assembly_stubs(monkeypatch)
+    result = write_spatialdata_base(config, "SLIDE-0272", dry_run=False, return_sdata=True)
+
+    assert result["labels"] == ["cell_labels", "nuclear_labels", "cytoplasm_labels"]
+    assert result["cytoplasm_summary"] == {
+        "subtraction_mode": "any_nuclear_overlap",
+        "removed_nuclear_pixels": 2,
+        "mismatching_overlap_pixels": 0,
+        "cytoplasm_pixels": 1,
+        "cytoplasm_label_count": 1,
+        "empty_label_count": 1,
+        "example_empty_labels": [1],
+    }
+    assert np.array_equal(
+        result["sdata"].labels["cytoplasm_labels"].payload,
+        np.array([[0, 0], [2, 0]], dtype=np.uint32),
+    )
 
 
 def test_finalize_spatialdata_requires_store(tmp_path: Path):
@@ -1746,6 +1875,71 @@ def test_build_spatialdata_execution_can_use_sum_aggregation(monkeypatch, tmp_pa
     assert [entry["aggregation_mode"] for entry in result["aggregate_tables"]] == ["sum", "sum"]
 
 
+def test_build_spatialdata_execution_can_aggregate_and_vectorize_cytoplasm(monkeypatch, tmp_path: Path):
+    import pandas as pd
+
+    config_path = write_config(tmp_path)
+    config = load_config(config_path)
+    spatialdata = config["slides"]["SLIDE-0272"]["spatialdata"]
+    spatialdata["derive_cytoplasm_labels"] = True
+    spatialdata["aggregate_cytoplasm_labels"] = True
+    spatialdata["derive_shapes"] = True
+    slide = get_slide_config(config, "SLIDE-0272")
+    paths = spatialdata_builder_module._spatialdata_paths(slide)
+
+    paths["full_merge_path"].write_bytes(b"fake")
+    paths["cell_mask_path"].parent.mkdir(parents=True, exist_ok=True)
+    tf.imwrite(paths["cell_mask_path"], np.array([[0, 1], [2, 2]], dtype=np.uint32))
+    tf.imwrite(paths["nuclear_mask_path"], np.array([[0, 1], [0, 2]], dtype=np.uint32))
+    paths["nimbus_table_path"].parent.mkdir(parents=True, exist_ok=True)
+    pd.DataFrame(
+        {
+            "cell_id": [1, 2],
+            "fov": ["SLIDE-0272", "SLIDE-0272"],
+            "slide_id": ["SLIDE-0272", "SLIDE-0272"],
+            "SLIDE-0272_0.0.2_R000_DAPI_F_Tiled": [0.1, 0.2],
+            "SLIDE-0272_0.0.2_R001_PANCK_F_Tiled": [0.3, 0.4],
+        }
+    ).to_csv(paths["nimbus_table_path"], index=False)
+
+    _install_spatialdata_assembly_stubs(monkeypatch)
+    result = build_spatialdata(config, "SLIDE-0272", dry_run=False, return_sdata=True)
+
+    assert result["labels"] == ["cell_labels", "nuclear_labels", "cytoplasm_labels"]
+    assert result["shapes"] == ["cell_boundaries", "nuclear_boundaries", "cytoplasm_boundaries"]
+    assert result["tables"] == [
+        "agg_cell_labels",
+        "agg_nuclear_labels",
+        "agg_cytoplasm_labels",
+        "nimbus_table",
+    ]
+    assert result["vectorization"] == [
+        {"name": "cell_boundaries", "backend": "harpy", "row_count": 2},
+        {"name": "nuclear_boundaries", "backend": "harpy", "row_count": 2},
+        {"name": "cytoplasm_boundaries", "backend": "harpy", "row_count": 1},
+    ]
+    cytoplasm_shapes = result["sdata"].shapes["cytoplasm_boundaries"].payload
+    assert list(cytoplasm_shapes["cell_id"]) == [2]
+    assert list(cytoplasm_shapes["instance_id"]) == ["2"]
+    assert list(cytoplasm_shapes.index) == ["2"]
+    assert [entry["name"] for entry in result["aggregate_tables"]] == [
+        "agg_cell_labels",
+        "agg_nuclear_labels",
+        "agg_cytoplasm_labels",
+    ]
+    assert result["written_elements"] == [
+        "cell_boundaries",
+        "nuclear_boundaries",
+        "cytoplasm_boundaries",
+        "agg_cell_labels",
+        "agg_nuclear_labels",
+        "agg_cytoplasm_labels",
+        "nimbus_table",
+    ]
+    assert result["transform_updates"]["cytoplasm_labels"] == 0.325
+    assert result["transform_updates"]["cytoplasm_boundaries"] == 0.325
+
+
 def test_build_spatialdata_execution_can_skip_missing_nimbus(monkeypatch, tmp_path: Path):
     config_path = write_config(tmp_path)
     config = load_config(config_path)
@@ -1811,3 +2005,73 @@ def test_diagnose_label_overlap_instances_reports_matching_ids():
         "exact_match": True,
         "example_mismatches": [],
     }
+
+
+def test_derive_cytoplasm_mask_subtracts_any_overlapping_nuclear_pixels_by_default():
+    cell_mask = np.array(
+        [
+            [0, 1, 1],
+            [2, 2, 2],
+            [0, 3, 3],
+        ],
+        dtype=np.uint32,
+    )
+    nuclear_mask = np.array(
+        [
+            [0, 1, 0],
+            [0, 2, 0],
+            [0, 3, 3],
+        ],
+        dtype=np.uint32,
+    )
+
+    cytoplasm, summary = spatialdata_builder_module.derive_cytoplasm_mask(cell_mask, nuclear_mask)
+
+    assert np.array_equal(
+        cytoplasm,
+        np.array(
+            [
+                [0, 0, 1],
+                [2, 0, 2],
+                [0, 0, 0],
+            ],
+            dtype=np.uint32,
+        ),
+    )
+    assert summary == {
+        "subtraction_mode": "any_nuclear_overlap",
+        "removed_nuclear_pixels": 4,
+        "mismatching_overlap_pixels": 0,
+        "cytoplasm_pixels": 3,
+        "cytoplasm_label_count": 2,
+        "empty_label_count": 1,
+        "example_empty_labels": [3],
+    }
+
+
+def test_derive_cytoplasm_mask_tolerates_mismatched_overlap_ids_by_default():
+    cell_mask = np.array([[0, 4], [5, 5]], dtype=np.uint32)
+    nuclear_mask = np.array([[0, 4], [0, 7]], dtype=np.uint32)
+
+    cytoplasm, summary = spatialdata_builder_module.derive_cytoplasm_mask(cell_mask, nuclear_mask)
+
+    assert np.array_equal(cytoplasm, np.array([[0, 0], [5, 0]], dtype=np.uint32))
+    assert summary["subtraction_mode"] == "any_nuclear_overlap"
+    assert summary["removed_nuclear_pixels"] == 2
+    assert summary["mismatching_overlap_pixels"] == 1
+
+
+def test_derive_cytoplasm_mask_strict_same_id_mode_rejects_mismatched_overlap_ids():
+    cell_mask = np.array([[0, 4], [5, 5]], dtype=np.uint32)
+    nuclear_mask = np.array([[0, 4], [0, 7]], dtype=np.uint32)
+
+    try:
+        spatialdata_builder_module.derive_cytoplasm_mask(
+            cell_mask,
+            nuclear_mask,
+            subtraction_mode="same_id",
+        )
+    except ValueError as exc:
+        assert "different cell IDs" in str(exc)
+    else:
+        raise AssertionError("Expected mismatched nuclear/cell IDs to block cytoplasm derivation.")

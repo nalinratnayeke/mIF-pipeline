@@ -231,10 +231,13 @@ Intensity allocation is performed against raster labels, with optional aggregati
 
 - cell labels
 - nuclear labels
+- cytoplasm labels, when explicitly derived from matching cell and nuclear IDs
 
 The pipeline exposes the Harpy aggregation statistic as `spatialdata.aggregation_mode`, with `mean` as the default and `sum` retained as an explicit opt-in for workflows that still want area-scaled totals.
 
-Polygon generation is optional and is treated as a derived artifact rather than the source of truth. Native SpatialData vectorization was retained as the default path after comparison against alternative approaches because it preserved instance correspondence more reliably in the tested workflow.
+Optional cytoplasm labels are computed as a raster-first derived layer by removing overlapping nuclear pixels from each whole-cell instance while preserving the cell ID on remaining cytoplasm pixels. The default mode subtracts any nuclear overlap, which is robust to small cell/nuclear ID mismatches observed in InstanSeg outputs. A strict `same_id` mode is available for workflows that require nuclear and cell instance IDs to match exactly.
+
+Polygon generation is optional and is treated as a derived artifact rather than the source of truth. Labels are vectorized with Harpy, which preserved non-contiguous raster instance IDs in crop testing and produced raster-faithful areas for cytoplasm shapes with holes.
 
 `harpy` is the key package for raster aggregation in this stage, while `spatialdata` provides the parsing and persistence model for the resulting image, label, shape, and table elements.
 

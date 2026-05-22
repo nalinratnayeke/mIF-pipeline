@@ -145,6 +145,23 @@ def _aggregate_nuclear_labels(spatialdata_block: dict[str, Any]) -> bool:
     return bool(spatialdata_block.get("aggregate_nuclear_labels", True))
 
 
+def _derive_cytoplasm_labels(spatialdata_block: dict[str, Any]) -> bool:
+    return bool(spatialdata_block.get("derive_cytoplasm_labels", False))
+
+
+def _aggregate_cytoplasm_labels(spatialdata_block: dict[str, Any]) -> bool:
+    return bool(spatialdata_block.get("aggregate_cytoplasm_labels", False))
+
+
+def _cytoplasm_subtraction_mode(spatialdata_block: dict[str, Any]) -> str:
+    mode = str(spatialdata_block.get("cytoplasm_subtraction_mode", "any_nuclear_overlap")).strip().lower()
+    allowed = {"any_nuclear_overlap", "same_id"}
+    if mode not in allowed:
+        allowed_text = ", ".join(sorted(allowed))
+        raise ValueError(f"spatialdata.cytoplasm_subtraction_mode must be one of {allowed_text}; got {mode!r}.")
+    return mode
+
+
 def _aggregation_mode(spatialdata_block: dict[str, Any]) -> str:
     return normalize_spatialdata_aggregation_mode(spatialdata_block.get("aggregation_mode"))
 
@@ -194,11 +211,21 @@ def _full_merge_aliases(config: dict[str, Any], slide_id: str) -> list[str]:
 
 
 def _table_region_name(label_name: str) -> str:
-    return "agg_cell_labels" if label_name == "cell_labels" else "agg_nuclear_labels"
+    mapping = {
+        "cell_labels": "agg_cell_labels",
+        "nuclear_labels": "agg_nuclear_labels",
+        "cytoplasm_labels": "agg_cytoplasm_labels",
+    }
+    return mapping.get(label_name, f"agg_{label_name}")
 
 
 def _shape_name(label_name: str) -> str:
-    return "cell_boundaries" if label_name == "cell_labels" else "nuclear_boundaries"
+    mapping = {
+        "cell_labels": "cell_boundaries",
+        "nuclear_labels": "nuclear_boundaries",
+        "cytoplasm_labels": "cytoplasm_boundaries",
+    }
+    return mapping.get(label_name, f"{label_name}_boundaries")
 
 
 def _strip_channel_prefix(name: str) -> str:
@@ -264,17 +291,24 @@ def _plan_result(config: dict[str, Any], slide_id: str) -> dict[str, Any]:
     aggregation_mode = _aggregation_mode(spatialdata_block)
     aggregate_cell_labels = _aggregate_cell_labels(spatialdata_block)
     aggregate_nuclear_labels = _aggregate_nuclear_labels(spatialdata_block)
+    derive_cytoplasm_labels = _derive_cytoplasm_labels(spatialdata_block)
+    aggregate_cytoplasm_labels = _aggregate_cytoplasm_labels(spatialdata_block)
+    cytoplasm_subtraction_mode = _cytoplasm_subtraction_mode(spatialdata_block)
     run_on_gpu = _aggregate_run_on_gpu(spatialdata_block)
     dask_scheduler = _cpu_dask_scheduler(spatialdata_block)
     derive_shapes = _derive_shapes(spatialdata_block)
     check_label_overlap = _check_label_overlap(spatialdata_block)
     planned_labels = ["cell_labels", "nuclear_labels"]
+    if derive_cytoplasm_labels:
+        planned_labels.append("cytoplasm_labels")
     planned_tables = []
     if aggregate:
         if aggregate_cell_labels:
             planned_tables.append("agg_cell_labels")
         if aggregate_nuclear_labels:
             planned_tables.append("agg_nuclear_labels")
+        if derive_cytoplasm_labels and aggregate_cytoplasm_labels:
+            planned_tables.append("agg_cytoplasm_labels")
     if load_nimbus:
         planned_tables.append("nimbus_table")
     return {
@@ -293,6 +327,9 @@ def _plan_result(config: dict[str, Any], slide_id: str) -> dict[str, Any]:
         "aggregation_mode": aggregation_mode,
         "aggregate_cell_labels": aggregate_cell_labels,
         "aggregate_nuclear_labels": aggregate_nuclear_labels,
+        "derive_cytoplasm_labels": derive_cytoplasm_labels,
+        "aggregate_cytoplasm_labels": aggregate_cytoplasm_labels,
+        "cytoplasm_subtraction_mode": cytoplasm_subtraction_mode,
         "run_on_gpu": run_on_gpu,
         "dask_scheduler": dask_scheduler,
         "derive_shapes": derive_shapes,
@@ -433,19 +470,32 @@ def _persist_backed_elements(sdata: Any, element_names: list[str]) -> None:
 def _vectorize_label_layer(
     sdata: Any,
     *,
-    spatialdata: Any,
+    hp: Any,
     label_name: str,
     shape_name: str,
     ShapesModel: Any,
 ) -> dict[str, Any]:
-    polygon_df = spatialdata.to_polygons(sdata.labels[label_name]).copy()
-    if "label" not in polygon_df.columns:
-        raise ValueError(f"Vectorized polygons for {label_name} are missing a 'label' column.")
-    polygon_df["cell_id"] = polygon_df["label"].astype(int)
+    sdata = hp.shape.vectorize(
+        sdata,
+        labels_layer=label_name,
+        output_layer=shape_name,
+        instance_key="cell_ID",
+        overwrite=True,
+    )
+    polygon_df = sdata.shapes[shape_name].copy()
+    try:
+        cell_ids = polygon_df.index.astype(int)
+    except (TypeError, ValueError) as exc:
+        raise ValueError(f"Harpy-vectorized polygons for {label_name} have non-integer instance IDs.") from exc
+    polygon_df["cell_id"] = cell_ids
     polygon_df["instance_id"] = polygon_df["cell_id"].astype(str)
     polygon_df = polygon_df.sort_values("cell_id").set_index("instance_id", drop=False)
     sdata[shape_name] = ShapesModel.parse(polygon_df)
-    return {"name": shape_name, "row_count": int(len(polygon_df.index))}
+    return {
+        "name": shape_name,
+        "backend": "harpy",
+        "row_count": int(len(polygon_df.index)),
+    }
 
 
 def _import_nimbus_table(
@@ -513,7 +563,12 @@ def _allocate_label_intensity(
     aggregation_mode: str,
     run_on_gpu: bool,
 ) -> tuple[Any, dict[str, Any]]:
-    size_key = "cell_size" if label_name == "cell_labels" else "nucleus_size"
+    size_keys = {
+        "cell_labels": "cell_size",
+        "nuclear_labels": "nucleus_size",
+        "cytoplasm_labels": "cytoplasm_size",
+    }
+    size_key = size_keys.get(label_name, f"{label_name}_size")
     sdata = hp.tb.allocate_intensity(
         sdata,
         img_layer="full_image",
@@ -650,12 +705,77 @@ def diagnose_label_overlap_instances(cell_mask: Any, nuclear_mask: Any) -> dict[
     }
 
 
-def _aggregation_targets(sdata: Any, *, aggregate_cell_labels: bool, aggregate_nuclear_labels: bool) -> list[str]:
+def derive_cytoplasm_mask(
+    cell_mask: Any,
+    nuclear_mask: Any,
+    *,
+    subtraction_mode: str = "any_nuclear_overlap",
+) -> tuple[Any, dict[str, Any]]:
+    import numpy as np
+
+    cell_array = np.asarray(cell_mask)
+    nuclear_array = np.asarray(nuclear_mask)
+    if cell_array.shape != nuclear_array.shape:
+        raise ValueError(
+            f"Cell mask shape {cell_array.shape} does not match nuclear mask shape {nuclear_array.shape}."
+        )
+
+    subtraction_mode = str(subtraction_mode).strip().lower()
+    if subtraction_mode not in {"any_nuclear_overlap", "same_id"}:
+        raise ValueError(f"Unsupported cytoplasm subtraction mode: {subtraction_mode!r}.")
+
+    overlap = (cell_array > 0) & (nuclear_array > 0)
+    mismatch_mask = overlap & (cell_array != nuclear_array)
+    mismatching_pixels = int(mismatch_mask.sum())
+    if mismatching_pixels and subtraction_mode == "same_id":
+        mismatch_coords = np.argwhere(mismatch_mask)[:5]
+        examples = [
+            {
+                "y": int(y),
+                "x": int(x),
+                "cell_id": int(cell_array[y, x]),
+                "nuclear_id": int(nuclear_array[y, x]),
+            }
+            for y, x in mismatch_coords
+        ]
+        raise ValueError(
+            "Cannot derive cytoplasm labels because nuclear labels overlap different cell IDs. "
+            f"Found {mismatching_pixels} mismatching pixels; examples: {examples}"
+        )
+
+    cytoplasm = cell_array.copy()
+    subtraction_mask = overlap if subtraction_mode == "any_nuclear_overlap" else overlap & (cell_array == nuclear_array)
+    cytoplasm[subtraction_mask] = 0
+
+    cell_ids = set(int(value) for value in np.unique(cell_array) if value > 0)
+    cytoplasm_ids = set(int(value) for value in np.unique(cytoplasm) if value > 0)
+    empty_ids = sorted(cell_ids.difference(cytoplasm_ids))
+    summary = {
+        "subtraction_mode": subtraction_mode,
+        "removed_nuclear_pixels": int(subtraction_mask.sum()),
+        "mismatching_overlap_pixels": mismatching_pixels,
+        "cytoplasm_pixels": int((cytoplasm > 0).sum()),
+        "cytoplasm_label_count": int(len(cytoplasm_ids)),
+        "empty_label_count": int(len(empty_ids)),
+        "example_empty_labels": empty_ids[:5],
+    }
+    return cytoplasm, summary
+
+
+def _aggregation_targets(
+    sdata: Any,
+    *,
+    aggregate_cell_labels: bool,
+    aggregate_nuclear_labels: bool,
+    aggregate_cytoplasm_labels: bool,
+) -> list[str]:
     targets: list[str] = []
     if aggregate_cell_labels and "cell_labels" in sdata.labels:
         targets.append("cell_labels")
     if aggregate_nuclear_labels and "nuclear_labels" in sdata.labels:
         targets.append("nuclear_labels")
+    if aggregate_cytoplasm_labels and "cytoplasm_labels" in sdata.labels:
+        targets.append("cytoplasm_labels")
     return targets
 
 
@@ -697,6 +817,8 @@ def write_spatialdata_base(
     cell_mask_path = paths["cell_mask_path"]
     nuclear_mask_path = paths["nuclear_mask_path"]
     check_label_overlap = _check_label_overlap(spatialdata_block)
+    derive_cytoplasm_labels = _derive_cytoplasm_labels(spatialdata_block)
+    cytoplasm_subtraction_mode = _cytoplasm_subtraction_mode(spatialdata_block)
     channel_names = _full_merge_aliases(config, slide_id)
     pixel_size_um = float(slide["pixel_size_um"])
     timings: dict[str, float] = {}
@@ -729,6 +851,7 @@ def write_spatialdata_base(
         label_arrays = {"cell_labels": cell_mask}
 
         overlap_diagnostics = None
+        cytoplasm_summary = None
         if nuclear_mask_path.exists():
             nuclear_mask = tifffile.imread(nuclear_mask_path)
             if tuple(int(value) for value in nuclear_mask.shape[-2:]) != image_canvas:
@@ -740,8 +863,23 @@ def write_spatialdata_base(
                 dims=("y", "x"),
             )
             label_arrays["nuclear_labels"] = nuclear_mask
-            if check_label_overlap:
+            if check_label_overlap or derive_cytoplasm_labels:
                 overlap_diagnostics = diagnose_label_overlap_instances(cell_mask, nuclear_mask)
+            if derive_cytoplasm_labels:
+                cytoplasm_mask, cytoplasm_summary = derive_cytoplasm_mask(
+                    cell_mask,
+                    nuclear_mask,
+                    subtraction_mode=cytoplasm_subtraction_mode,
+                )
+                labels["cytoplasm_labels"] = Labels2DModel.parse(
+                    _chunk_label_array(cytoplasm_mask, spatial_chunks=label_spatial_chunks),
+                    dims=("y", "x"),
+                )
+                label_arrays["cytoplasm_labels"] = cytoplasm_mask
+        elif derive_cytoplasm_labels:
+            raise FileNotFoundError(
+                f"Cytoplasm labels require an existing nuclear mask: {nuclear_mask_path}"
+            )
         step_started = _record_timing(timings, "mask_load_seconds", step_started)
 
         # Keep rasters in pixel space for the base store. Harpy aggregation currently
@@ -771,8 +909,11 @@ def write_spatialdata_base(
             "image_level_keys": image_details["level_keys"],
             "labels": list(sdata.labels.keys()),
             "check_label_overlap": check_label_overlap,
+            "derive_cytoplasm_labels": derive_cytoplasm_labels,
+            "cytoplasm_subtraction_mode": cytoplasm_subtraction_mode,
             "image_level_details": image_details["level_details"],
             "overlap_diagnostics": overlap_diagnostics,
+            "cytoplasm_summary": cytoplasm_summary,
             "timings": timings,
         }
         if return_sdata:
@@ -821,6 +962,9 @@ def finalize_spatialdata(
     aggregation_mode = _aggregation_mode(spatialdata_block)
     aggregate_cell_labels = _aggregate_cell_labels(spatialdata_block)
     aggregate_nuclear_labels = _aggregate_nuclear_labels(spatialdata_block)
+    derive_cytoplasm_labels = _derive_cytoplasm_labels(spatialdata_block)
+    aggregate_cytoplasm_labels = _aggregate_cytoplasm_labels(spatialdata_block)
+    cytoplasm_subtraction_mode = _cytoplasm_subtraction_mode(spatialdata_block)
     run_on_gpu = _aggregate_run_on_gpu(spatialdata_block)
     dask_scheduler = _cpu_dask_scheduler(spatialdata_block)
     derive_shapes = _derive_shapes(spatialdata_block)
@@ -847,9 +991,9 @@ def finalize_spatialdata(
             try:
                 dask = _import_dask()
             except ImportError:
-                print("[spatialdata] Dask not available; using default scheduler for CPU vectorization", flush=True)
+                print("[spatialdata] Dask not available; using default scheduler for Harpy vectorization", flush=True)
             else:
-                print(f"[spatialdata] using Dask scheduler={dask_scheduler!r} for CPU vectorization", flush=True)
+                print(f"[spatialdata] using Dask scheduler={dask_scheduler!r} for Harpy vectorization", flush=True)
                 dask_context = dask.config.set(scheduler=dask_scheduler)
         with dask_context:
             for label_name in list(sdata.labels.keys()):
@@ -857,7 +1001,7 @@ def finalize_spatialdata(
                 vectorization.append(
                     _vectorize_label_layer(
                         sdata,
-                        spatialdata=spatialdata,
+                        hp=hp,
                         label_name=label_name,
                         shape_name=shape_name,
                         ShapesModel=ShapesModel,
@@ -872,6 +1016,7 @@ def finalize_spatialdata(
             sdata,
             aggregate_cell_labels=aggregate_cell_labels,
             aggregate_nuclear_labels=aggregate_nuclear_labels,
+            aggregate_cytoplasm_labels=aggregate_cytoplasm_labels,
         )
         print(f"[spatialdata] aggregating intensity tables for {targets}", flush=True)
         for label_name in targets:
@@ -952,6 +1097,9 @@ def finalize_spatialdata(
         "aggregation_mode": aggregation_mode,
         "aggregate_cell_labels": aggregate_cell_labels,
         "aggregate_nuclear_labels": aggregate_nuclear_labels,
+        "derive_cytoplasm_labels": derive_cytoplasm_labels,
+        "aggregate_cytoplasm_labels": aggregate_cytoplasm_labels,
+        "cytoplasm_subtraction_mode": cytoplasm_subtraction_mode,
         "run_on_gpu": run_on_gpu,
         "dask_scheduler": dask_scheduler,
         "derive_shapes": derive_shapes,

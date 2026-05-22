@@ -46,6 +46,7 @@ Important points:
 - `nimbus.multislide` is no longer supported.
 - `spatialdata` writes the final canonical slide-local SpatialData store.
 - `spatialdata.aggregation_mode` controls raster intensity allocation and defaults to `mean`.
+- `spatialdata.derive_cytoplasm_labels` can derive an opt-in cytoplasm label layer from matching cell and nuclear instance IDs.
 
 The most important per-slide fields are:
 
@@ -149,6 +150,10 @@ SpatialData assembly is intentionally separate from the InstanSeg/Nimbus environ
 The final store is the only canonical SpatialData artifact for a slide. During finalization, tables and optional shapes are appended into that same slide-local store.
 
 When aggregation is enabled, the default raster intensity statistic is `mean`. Set `spatialdata.aggregation_mode: sum` if you need the older sum-based behavior.
+
+When shape derivation is enabled, labels are vectorized with Harpy so original raster instance IDs are preserved in the derived shape metadata.
+
+Set `spatialdata.derive_cytoplasm_labels: true` to add a raster `cytoplasm_labels` layer computed from `cell_labels` after subtracting overlapping nuclear pixels. The default `spatialdata.cytoplasm_subtraction_mode: any_nuclear_overlap` is robust to small cell/nuclear ID mismatches; set it to `same_id` for strict identity-based subtraction. Set `spatialdata.aggregate_cytoplasm_labels: true` to add the corresponding intensity table; when shape derivation is enabled, `cytoplasm_boundaries` is derived from the cytoplasm raster like the other label layers.
 
 ## Design Notes
 

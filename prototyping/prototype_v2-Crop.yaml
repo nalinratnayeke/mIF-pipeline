@@ -18,19 +18,19 @@ instanseg:
   channels: [R1_DAPI, R1_FITC_AF, R4_P19_POLYRAT, R4_ANXA10_647, R4_LGALS4_750]
   model: fluorescence_nuclei_and_cells
   mode: medium
-  prediction_tag: _instanseg_prediction
+  prediction_tag: _instanseg_prediction_seed01
   tile_size: 1000
   overlap: 100
   batch_size: 1
   resolve_cell_and_nucleus: true
   cleanup_fragments: true
-  seed_threshold: 0.6
+  seed_threshold: 0.1
   planes:
     nuclei_plane: 0
     cells_plane: 1
 
 mask_export:
-  mask_dir: masks
+  mask_dir: masks_seed01
   suffix: _whole_cell.tiff
   nuclear_suffix: _nuclear.tiff
   bigtiff: true
@@ -58,12 +58,15 @@ nimbus:
 
 spatialdata:
   enabled: true
-  suffix: _spatialdata.sdata.zarr
+  suffix: _spatialdata_harpy_seed01_test.sdata.zarr
   aggregate: true
   aggregate_cell_labels: true
   aggregate_nuclear_labels: true
-  run_on_gpu: true
-  dask_scheduler: processes
+  derive_cytoplasm_labels: true
+  cytoplasm_subtraction_mode: any_nuclear_overlap
+  aggregate_cytoplasm_labels: true
+  run_on_gpu: false
+  dask_scheduler: threads
   derive_shapes: true
   check_label_overlap: true
   load_nimbus: true

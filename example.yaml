@@ -66,6 +66,9 @@ spatialdata:
   aggregation_mode: mean
   aggregate_cell_labels: true
   aggregate_nuclear_labels: true
+  derive_cytoplasm_labels: false
+  cytoplasm_subtraction_mode: any_nuclear_overlap
+  aggregate_cytoplasm_labels: false
   run_on_gpu: false
   dask_scheduler: processes
   derive_shapes: false

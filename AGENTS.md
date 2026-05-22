@@ -51,6 +51,7 @@ These are now deliberate and should be preserved unless the user asks for a chan
 - SpatialData assembly runs in a modern Harpy + SpatialData environment, separate from the InstanSeg/Nimbus environment.
 - The image import path should use the working `tiffslide -> zarr -> xarray -> DataTree -> SpatialData` approach, not the older direct `Image2DModel.parse(...)` path for the merged OME-TIFF.
 - Raster intensity aggregation is configurable through `spatialdata.aggregation_mode` and defaults to `mean`.
+- Optional `cytoplasm_labels` must be derived raster-first as cell labels minus overlapping nuclear pixels, preserving cell instance IDs on remaining cytoplasm pixels.
 - Raster labels are the segmentation source of truth.
 - Shapes are optional derived artifacts.
 
@@ -95,6 +96,7 @@ Important config rules:
 - keep `nimbus.output_dir` slide-local
 - keep `spatialdata.store_path` slide-local
 - validate `spatialdata.aggregation_mode` against the supported `mean` / `sum` options
+- keep cytoplasm derivation opt-in through `spatialdata.derive_cytoplasm_labels`
 
 The `setup` block may also define post-generation refinement rules:
 
@@ -211,6 +213,7 @@ ic.TiffSlide = TiffSlide
 
 - Harpy allocation currently expects translation transforms during aggregation, so scale transforms must be handled carefully around finalize logic.
 - The pipeline writes the base image + labels first, then finalizes the same canonical store with aggregation, optional Nimbus import, and optional shapes.
+- Optional shapes are vectorized from labels with Harpy and should preserve the original non-contiguous raster instance IDs.
 - Mask chunking must be aligned to the image chunk grid before Harpy aggregation when using native spatial chunks.
 
 ## Documentation Expectations
