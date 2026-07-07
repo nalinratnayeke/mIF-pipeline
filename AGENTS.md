@@ -82,6 +82,7 @@ Top-level shared defaults commonly include:
 - `mask_export`
 - `nimbus`
 - `spatialdata`
+- `provenance`
 
 Per-slide blocks under `slides.<slide_id>` should define:
 
@@ -94,9 +95,11 @@ Important config rules:
 - reject legacy `seg_merge`
 - reject legacy `nimbus.multislide`
 - keep `nimbus.output_dir` slide-local
+- keep `nimbus.normalization_mode: prepared` as the default; allow `per_slide` only as an explicit opt-in for single-slide normalization
 - keep `spatialdata.store_path` slide-local
 - validate `spatialdata.aggregation_mode` against the supported `mean` / `sum` options
 - keep cytoplasm derivation opt-in through `spatialdata.derive_cytoplasm_labels`
+- keep run-record provenance as slide-local CLI sidecars under `run_records/` by default; do not add it as a separate stage
 
 The `setup` block may also define post-generation refinement rules:
 

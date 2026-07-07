@@ -21,6 +21,11 @@ The canonical outputs for each slide are:
 - one slide-local Nimbus table
 - one final slide-local SpatialData store
 
+In addition to these scientific artifacts, CLI execution writes slide-local run records under
+`run_records/`. These JSON records capture the resolved settings, channel map snapshot, command,
+runtime context, git state, and stage result used for each invocation. They are provenance sidecars,
+not additional pipeline stages.
+
 ## Software Environment and Package Roles
 
 The pipeline is implemented in Python and relies on a small set of domain-specific libraries rather than a large workflow framework. We favored explicit orchestration in a lightweight local package so that the same code path could be used from notebooks, the CLI, and cluster job scripts.
@@ -165,6 +170,11 @@ The normalization dictionaries are copied into each slide’s local Nimbus chunk
 
 This preserves shared normalization while keeping each slide’s actual execution and outputs fully local.
 
+By default, per-slide Nimbus execution uses `nimbus.normalization_mode: prepared`, which requires
+the prepared `normalization_dict.json` files to already exist. A separate
+`nimbus.normalization_mode: per_slide` option is available for exploratory or intentionally
+single-slide runs where normalization should be computed inside that slide's local chunk folders.
+
 This stage is implemented around the native `nimbus_inference` `MultiplexDataset` abstraction. We deliberately preserved Nimbus’s own normalization logic rather than reimplementing normalization independently, because using the package’s built-in path reduced the risk of divergence between development-time tests and production-time inference.
 
 ### Why the old multislide output root was removed
@@ -225,6 +235,11 @@ The SpatialData stage is logically split into:
 
 This structure was introduced after experiments with one-shot assembly and with a separate intermediate store. A separate persisted intermediate store improved reasoning about laziness and distributed execution, but keeping two stores on disk increased storage overhead. The current implementation therefore writes the base and then finalizes the same canonical store in place.
 
+The convenience `assemble_spatialdata(...)` path writes the base store and then finalizes it only
+when it creates or force-rebuilds that base store. If the canonical store already exists and
+`force=False`, it leaves the store unchanged; updating an existing store is an explicit
+`finalize_spatialdata(...)` operation.
+
 ### Aggregation and vectorization
 
 Intensity allocation is performed against raster labels, with optional aggregation for:
@@ -261,6 +276,11 @@ The cluster recovery model is explicit:
 - if a slide fails earlier, rerun only the necessary later stages
 
 This restart model is one of the central reasons the workflow was organized around stable per-slide file artifacts instead of in-memory object handoffs or cross-slide barrier jobs.
+
+Slide-local run records support this restart model by preserving the settings used for each stage
+next to the generated outputs. When a slide is resumed from a later stage, the output folder can
+still show which config, channel map, stage list, and runtime context produced the existing upstream
+artifacts.
 
 ## Cluster Execution Considerations
 

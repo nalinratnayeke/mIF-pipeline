@@ -43,6 +43,9 @@ mask_export:
 nimbus:
   enabled: false
   output_dir: nimbus
+  # prepared: require nimbus-prepare JSONs before per-slide runs.
+  # per_slide: compute normalization during each single-slide Nimbus run.
+  normalization_mode: prepared
   # Run `mif-pipeline nimbus-prepare --slides ...` interactively before
   # per-slide batch execution when you want shared normalization across slides.
   # Use either channels or exclude_channels. Aliases should match
@@ -76,6 +79,10 @@ spatialdata:
   load_nimbus: true
   # This stage is intended to run in a modern Harpy + SpatialData environment
   # after merge / InstanSeg / optional Nimbus file artifacts already exist.
+
+provenance:
+  enabled: true
+  dirname: run_records
 
 slides:
   SLIDE-0272:

@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import sys
 from pathlib import Path
 from typing import Any, Callable, Optional
 
@@ -10,6 +11,7 @@ from .instanseg_runner import run_instanseg
 from .merge_ometiff import merge_slide_ometiffs
 from .nimbus_runner import prepare_nimbus_normalization, run_nimbus_chunked
 from .pipeline import run_all
+from .provenance import write_stage_run_records
 from .qc import qc_slide
 from .setup import setup_slide, setup_slides
 from .spatialdata_builder import assemble_spatialdata
@@ -186,6 +188,14 @@ def main(argv: Optional[list[str]] = None) -> int:
     }
 
     result = command_map[args.command]()
+    run_records = write_stage_run_records(
+        config,
+        stage=args.command,
+        result=result,
+        argv=list(sys.argv[1:] if argv is None else argv),
+    )
+    if run_records:
+        result["_run_records"] = run_records
     _print_result(result)
     return 0
 

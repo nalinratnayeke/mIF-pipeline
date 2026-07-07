@@ -32,9 +32,11 @@ from mif_pipeline.nimbus_runner import (
     run_nimbus_chunked,
 )
 from mif_pipeline.pipeline import run_all
+from mif_pipeline.provenance import write_stage_run_records
 from mif_pipeline.setup import refine_channel_map, setup_slide, setup_slides
 import mif_pipeline.spatialdata_builder as spatialdata_builder_module
 from mif_pipeline.spatialdata_builder import build_spatialdata, finalize_spatialdata, write_spatialdata_base
+from mif_pipeline.cli import main as cli_main
 
 
 def write_config(tmp_path: Path) -> Path:
@@ -104,6 +106,7 @@ def write_config(tmp_path: Path) -> Path:
                 "nimbus": {
                     "enabled": True,
                     "output_dir": "nimbus",
+                    "normalization_mode": "prepared",
                     "channels": ["R0_DAPI", "R0_PANCK"],
                     "channel_chunk_size": 1,
                     "join_keys": ["fov", "cell_id"],
@@ -238,6 +241,7 @@ def write_multislide_config(tmp_path: Path, *, mismatch: bool = False) -> Path:
         "nimbus": {
             "enabled": True,
             "output_dir": "nimbus",
+            "normalization_mode": "prepared",
             "channels": ["R0_DAPI", "R0_PANCK"],
             "channel_chunk_size": 1,
             "join_keys": ["fov", "cell_id"],
@@ -289,6 +293,108 @@ def test_load_config_and_channel_map_resolution(tmp_path: Path):
     assert [entry["alias"] for entry in channel_map] == ["R0_DAPI", "R0_PANCK"]
     resolved_entries = resolve_channel_entries(config, "SLIDE-0272", ["R0_DAPI"])
     assert resolved_entries[0]["nimbus_name"] == "SLIDE-0272_0.0.2_R000_DAPI_F_Tiled"
+
+
+def test_write_stage_run_records_captures_resolved_settings(tmp_path: Path):
+    config_path = write_config(tmp_path)
+    config = load_config(config_path)
+    result = {
+        "slide_id": "SLIDE-0272",
+        "status": "skipped",
+        "dry_run": False,
+        "example_path": tmp_path / "work" / "SLIDE-0272",
+    }
+
+    records = write_stage_run_records(
+        config,
+        stage="merge",
+        result=result,
+        argv=["merge", "--config", str(config_path), "--slide", "SLIDE-0272"],
+    )
+
+    assert len(records) == 1
+    record_path = Path(records[0]["record_path"])
+    latest_path = tmp_path / "work" / "SLIDE-0272" / "run_records" / "latest_merge.json"
+    assert record_path.exists()
+    assert latest_path.exists()
+
+    record = json.loads(record_path.read_text(encoding="utf-8"))
+    assert record["schema_version"] == 1
+    assert record["stage"] == "merge"
+    assert record["slide_id"] == "SLIDE-0272"
+    assert record["config"]["path"] == str(config_path.resolve())
+    assert record["config"]["sha256"]
+    assert record["resolved_slide_config"]["full_merge"]["ome_path"].endswith("SLIDE-0272_full.ome.tif")
+    assert record["channel_map"]["entries"][0]["alias"] == "R0_DAPI"
+    assert record["stage_result"]["example_path"] == str(tmp_path / "work" / "SLIDE-0272")
+
+
+def test_write_stage_run_records_skips_dry_run(tmp_path: Path):
+    config = load_config(write_config(tmp_path))
+
+    records = write_stage_run_records(
+        config,
+        stage="merge",
+        result={"slide_id": "SLIDE-0272", "status": "planned", "dry_run": True},
+        argv=["dry-run", "--config", "example.yaml", "--slide", "SLIDE-0272"],
+    )
+
+    assert records == []
+    assert not (tmp_path / "work" / "SLIDE-0272" / "run_records").exists()
+
+
+def test_write_stage_run_records_can_be_disabled(tmp_path: Path):
+    config = load_config(write_config(tmp_path))
+    config["provenance"] = {"enabled": False}
+
+    records = write_stage_run_records(
+        config,
+        stage="merge",
+        result={"slide_id": "SLIDE-0272", "status": "skipped", "dry_run": False},
+    )
+
+    assert records == []
+    assert not (tmp_path / "work" / "SLIDE-0272" / "run_records").exists()
+
+
+def test_write_stage_run_records_handles_multislide_results(tmp_path: Path):
+    config = load_config(write_multislide_config(tmp_path))
+    result = {
+        "slide_ids": ["SLIDE-A", "SLIDE-B"],
+        "status": "written",
+        "dry_run": False,
+        "chunks": [{"chunk_index": 0, "aliases": ["R0_DAPI"]}],
+    }
+
+    records = write_stage_run_records(
+        config,
+        stage="nimbus-prepare",
+        result=result,
+        argv=["nimbus-prepare", "--slides", "SLIDE-A,SLIDE-B"],
+    )
+
+    assert [record["slide_id"] for record in records] == ["SLIDE-A", "SLIDE-B"]
+    for slide_id in ["SLIDE-A", "SLIDE-B"]:
+        record_path = tmp_path / "work" / slide_id / "run_records" / "latest_nimbus-prepare.json"
+        record = json.loads(record_path.read_text(encoding="utf-8"))
+        assert record["full_result"]["slide_ids"] == ["SLIDE-A", "SLIDE-B"]
+        assert record["stage_result"]["slide_ids"] == ["SLIDE-A", "SLIDE-B"]
+
+
+def test_cli_setup_writes_run_record(tmp_path: Path, capsys):
+    config_path = write_config(tmp_path)
+
+    exit_code = cli_main(["setup", "--config", str(config_path), "--slide", "SLIDE-0272", "--force"])
+
+    assert exit_code == 0
+    output = json.loads(capsys.readouterr().out)
+    assert output["_run_records"][0]["slide_id"] == "SLIDE-0272"
+    record_path = Path(output["_run_records"][0]["record_path"])
+    assert record_path.exists()
+    record = json.loads(record_path.read_text(encoding="utf-8"))
+    assert record["stage"] == "setup"
+    assert record["cli"]["argv"] == ["setup", "--config", str(config_path), "--slide", "SLIDE-0272", "--force"]
+    assert record["stage_result"]["status"] == "generated"
 
 
 def test_run_instanseg_writes_full_resolution_masks_in_medium_mode(tmp_path: Path, monkeypatch):
@@ -814,6 +920,20 @@ def test_load_config_rejects_legacy_nimbus_multislide(tmp_path: Path):
         raise AssertionError("Expected legacy nimbus.multislide configs to raise ValueError.")
 
 
+def test_load_config_rejects_invalid_nimbus_normalization_mode(tmp_path: Path):
+    config_path = write_config(tmp_path)
+    raw = yaml.safe_load(config_path.read_text(encoding="utf-8"))
+    raw["slides"]["SLIDE-0272"]["nimbus"]["normalization_mode"] = "sometimes"
+    config_path.write_text(yaml.safe_dump(raw), encoding="utf-8")
+
+    try:
+        load_config(config_path)
+    except ValueError as exc:
+        assert "Nimbus normalization_mode" in str(exc)
+    else:
+        raise AssertionError("Expected invalid Nimbus normalization_mode to raise ValueError.")
+
+
 def test_setup_slides_generates_all_matching_channel_maps(tmp_path: Path):
     config_path = write_multislide_config(tmp_path)
     config = load_config(config_path)
@@ -956,11 +1076,14 @@ def test_nimbus_chunk_dry_run(tmp_path: Path):
 def test_prepare_nimbus_normalization_dry_run(tmp_path: Path):
     config_path = write_multislide_config(tmp_path)
     config = load_config(config_path)
+    config["slides"]["SLIDE-B"]["nimbus"]["channel_chunk_size"] = 1
 
     result = prepare_nimbus_normalization(config, ["SLIDE-A", "SLIDE-B"], chunk_indices=[1], dry_run=True)
 
     assert result["status"] == "planned"
     assert result["slide_ids"] == ["SLIDE-A", "SLIDE-B"]
+    assert result["normalization_mode"] == "prepared"
+    assert result["channel_chunk_size"] == 1
     assert result["selected_chunk_indices"] == [1]
     assert result["chunks"][0]["aliases"] == ["R0_PANCK"]
     assert result["chunks"][0]["normalization_dict_paths"]["SLIDE-A"].endswith(
@@ -971,6 +1094,7 @@ def test_prepare_nimbus_normalization_dry_run(tmp_path: Path):
 def test_prepare_nimbus_normalization_writes_slide_local_jsons(tmp_path: Path, monkeypatch):
     config_path = write_multislide_config(tmp_path)
     config = load_config(config_path)
+    config["slides"]["SLIDE-B"]["nimbus"]["channel_chunk_size"] = 1
     calls: list[dict[str, Any]] = []
 
     class DummyDataset:
@@ -1019,6 +1143,7 @@ def test_prepare_nimbus_normalization_writes_slide_local_jsons(tmp_path: Path, m
 def test_prepare_nimbus_normalization_reuses_existing_jsons(tmp_path: Path, monkeypatch):
     config_path = write_multislide_config(tmp_path)
     config = load_config(config_path)
+    config["slides"]["SLIDE-B"]["nimbus"]["channel_chunk_size"] = 1
     for slide_id in ("SLIDE-A", "SLIDE-B"):
         chunk_dir = tmp_path / "work" / slide_id / "nimbus" / "chunk_000"
         chunk_dir.mkdir(parents=True, exist_ok=True)
@@ -1033,6 +1158,18 @@ def test_prepare_nimbus_normalization_reuses_existing_jsons(tmp_path: Path, monk
 
     assert result["status"] == "reused"
     assert result["chunks"][0]["status"] == "reused"
+
+
+def test_prepare_nimbus_normalization_requires_identical_chunk_size(tmp_path: Path):
+    config_path = write_multislide_config(tmp_path)
+    config = load_config(config_path)
+
+    try:
+        prepare_nimbus_normalization(config, ["SLIDE-A", "SLIDE-B"], dry_run=True)
+    except ValueError as exc:
+        assert "identical nimbus.channel_chunk_size" in str(exc)
+    else:
+        raise AssertionError("Expected mismatched Nimbus chunk sizes to raise ValueError.")
 
 
 def test_prepare_nimbus_normalization_requires_identical_aliases(tmp_path: Path):
@@ -1110,10 +1247,11 @@ def test_run_nimbus_chunked_execution_with_stubs(tmp_path: Path, monkeypatch):
     result = run_nimbus_chunked(config, "SLIDE-0272", force=False)
 
     assert result["status"] == "written"
+    assert result["normalization_mode"] == "prepared"
     assert result["finalized"] is True
     assert result["merged_row_count"] == 1
     assert result["join_keys"] == ["fov", "cell_id"]
-    assert len(calls["normalization"]) == 2
+    assert len(calls["normalization"]) == 0
     assert calls["predict"] == 2
     assert calls["datasets"][0]["fov_paths"] == [str(Path(slide["full_merge"]["ome_path"]))]
     assert calls["datasets"][0]["include_channels"] == ["R0_DAPI"]
@@ -1124,9 +1262,7 @@ def test_run_nimbus_chunked_execution_with_stubs(tmp_path: Path, monkeypatch):
     assert merged.iloc[0]["cell_id"] == 1
 
 
-def test_run_nimbus_chunked_partial_chunk_execution_with_stubs(tmp_path: Path, monkeypatch):
-    import pandas as pd
-
+def test_run_nimbus_chunked_prepared_mode_requires_existing_jsons(tmp_path: Path, monkeypatch):
     config_path = write_config(tmp_path)
     config = load_config(config_path)
     slide = get_slide_config(config, "SLIDE-0272")
@@ -1139,11 +1275,44 @@ def test_run_nimbus_chunked_partial_chunk_execution_with_stubs(tmp_path: Path, m
     mask_dir.mkdir(parents=True, exist_ok=True)
     tf.imwrite(mask_dir / "SLIDE-0272_whole_cell.tiff", np.array([[0, 1], [1, 2]], dtype=np.uint32))
 
+    def fail_import():
+        raise AssertionError("Nimbus should not be imported when prepared normalization is missing.")
+
+    monkeypatch.setattr("mif_pipeline.nimbus_runner._import_nimbus", fail_import)
+
+    try:
+        run_nimbus_chunked(config, "SLIDE-0272", force=False)
+    except FileNotFoundError as exc:
+        assert "normalization_mode='prepared'" in str(exc)
+        assert "nimbus-prepare" in str(exc)
+    else:
+        raise AssertionError("Expected missing prepared Nimbus normalization JSONs to raise FileNotFoundError.")
+
+
+def test_run_nimbus_chunked_per_slide_mode_computes_normalization_with_stubs(tmp_path: Path, monkeypatch):
+    import pandas as pd
+
+    config_path = write_config(tmp_path)
+    config = load_config(config_path)
+    config["slides"]["SLIDE-0272"]["nimbus"]["normalization_mode"] = "per_slide"
+    slide = get_slide_config(config, "SLIDE-0272")
+    tf.imwrite(
+        Path(slide["full_merge"]["ome_path"]),
+        np.zeros((2, 8, 8), dtype=np.uint16),
+        metadata={"axes": "CYX"},
+    )
+    mask_dir = Path(slide["mask_export"]["mask_dir"])
+    mask_dir.mkdir(parents=True, exist_ok=True)
+    tf.imwrite(mask_dir / "SLIDE-0272_whole_cell.tiff", np.array([[0, 1], [1, 2]], dtype=np.uint32))
+
+    calls = {"normalization": 0}
+
     class DummyDataset:
         def __init__(self, *, fov_paths, suffix, include_channels, segmentation_naming_convention, output_dir, **kwargs):
             self.include_channels = list(include_channels)
 
         def prepare_normalization_dict(self, **kwargs):
+            calls["normalization"] += 1
             return None
 
     class DummyNimbus:
@@ -1167,8 +1336,11 @@ def test_run_nimbus_chunked_partial_chunk_execution_with_stubs(tmp_path: Path, m
     result = run_nimbus_chunked(config, "SLIDE-0272", chunk_indices=[0], force=True)
 
     assert result["status"] == "partial"
+    assert result["normalization_mode"] == "per_slide"
     assert result["finalized"] is False
     assert result["selected_chunk_indices"] == [0]
+    assert calls["normalization"] == 1
+    assert result["chunks"][0]["normalization_status"] == "computed_per_slide"
     assert Path(result["chunks"][0]["cell_table_csv"]).exists()
     assert not Path(result["merged_csv"]).exists()
 
@@ -1395,6 +1567,35 @@ def test_spatialdata_dry_run_can_plan_cytoplasm_labels_shapes_and_table(tmp_path
     ]
     assert result["derive_cytoplasm_labels"] is True
     assert result["aggregate_cytoplasm_labels"] is True
+
+
+def test_assemble_spatialdata_does_not_finalize_existing_store_without_force(tmp_path: Path, monkeypatch):
+    config_path = write_config(tmp_path)
+    config = load_config(config_path)
+    config["slides"]["SLIDE-0272"]["spatialdata"]["enabled"] = True
+
+    def fake_write_base(config_arg, slide_id, *, force=False, dry_run=False, return_sdata=False):
+        assert force is False
+        return {
+            "slide_id": slide_id,
+            "status": "skipped",
+            "dry_run": False,
+            "stage": "write_base",
+            "store_path": str(tmp_path / "existing.sdata.zarr"),
+        }
+
+    def fail_finalize(*args, **kwargs):
+        raise AssertionError("assemble_spatialdata(force=False) should not finalize an existing skipped store.")
+
+    monkeypatch.setattr(spatialdata_builder_module, "write_spatialdata_base", fake_write_base)
+    monkeypatch.setattr(spatialdata_builder_module, "finalize_spatialdata", fail_finalize)
+
+    result = build_spatialdata(config, "SLIDE-0272", force=False, dry_run=False, return_sdata=False)
+
+    assert result["status"] == "skipped"
+    assert result["stage"] == "assemble"
+    assert result["finalize_stage"] is None
+    assert "did not mutate" in result["message"]
 
 
 def test_dry_run_pipeline_stops_before_spatialdata(tmp_path: Path):

@@ -11,6 +11,7 @@ from .config import (
     ensure_config,
     get_slide_config,
     infer_image_suffix,
+    normalize_nimbus_normalization_mode,
     resolve_nimbus_channel_entries,
     strip_image_suffix,
 )
@@ -154,6 +155,24 @@ def _shared_nimbus_aliases(config: dict[str, Any], slide_ids: list[str]) -> list
     return reference_aliases
 
 
+def _nimbus_normalization_mode(nimbus_block: dict[str, Any]) -> str:
+    return normalize_nimbus_normalization_mode(nimbus_block.get("normalization_mode"))
+
+
+def _shared_nimbus_channel_chunk_size(slides: list[dict[str, Any]]) -> int:
+    reference_slide = slides[0]
+    reference_size = int((reference_slide.get("nimbus") or {}).get("channel_chunk_size", 1))
+    for slide in slides[1:]:
+        chunk_size = int((slide.get("nimbus") or {}).get("channel_chunk_size", 1))
+        if chunk_size != reference_size:
+            raise ValueError(
+                "Nimbus normalization prep requires identical nimbus.channel_chunk_size across selected slides. "
+                f"Reference slide {reference_slide['slide_id']}: {reference_size}; "
+                f"slide {slide['slide_id']}: {chunk_size}."
+            )
+    return reference_size
+
+
 def _slide_chunk_dir(slide: dict[str, Any], chunk_index: int) -> Path:
     nimbus = slide.get("nimbus") or {}
     return Path(nimbus["output_dir"]) / f"chunk_{chunk_index:03d}"
@@ -244,11 +263,14 @@ def prepare_nimbus_normalization(
         }
 
     shared_aliases = _shared_nimbus_aliases(config, selected_slide_ids)
-    chunk_aliases = list(chunked(shared_aliases, int(reference_nimbus.get("channel_chunk_size", 1))))
+    channel_chunk_size = _shared_nimbus_channel_chunk_size(selected_slides)
+    chunk_aliases = list(chunked(shared_aliases, channel_chunk_size))
     selected_chunk_indices = _normalize_chunk_indices(chunk_indices, chunk_count=len(chunk_aliases))
 
     result = {
         "slide_ids": selected_slide_ids,
+        "normalization_mode": "prepared",
+        "channel_chunk_size": channel_chunk_size,
         "chunk_count": len(chunk_aliases),
         "selected_chunk_indices": selected_chunk_indices,
         "selected_chunk_count": len(selected_chunk_indices),
@@ -376,6 +398,7 @@ def run_nimbus_chunked(
     entries = resolve_nimbus_channel_entries(config, slide_id)
     entry_lookup = {entry["alias"]: entry for entry in entries}
     aliases = [entry["alias"] for entry in entries]
+    normalization_mode = _nimbus_normalization_mode(nimbus)
     channel_chunk_size = int(nimbus.get("channel_chunk_size", 1))
     chunk_aliases = list(chunked(aliases, channel_chunk_size))
     selected_chunk_indices = _normalize_chunk_indices(chunk_indices, chunk_count=len(chunk_aliases))
@@ -389,6 +412,8 @@ def run_nimbus_chunked(
         "full_merge_path": str(full_merge_path),
         "mask_path": str(mask_path),
         "output_dir": str(output_dir),
+        "normalization_mode": normalization_mode,
+        "channel_chunk_size": channel_chunk_size,
         "chunk_count": len(chunk_aliases),
         "selected_chunk_indices": selected_chunk_indices,
         "selected_chunk_count": len(selected_chunk_indices),
@@ -419,6 +444,23 @@ def run_nimbus_chunked(
     if dry_run:
         return result
 
+    if normalization_mode == "prepared":
+        missing_normalization = [
+            chunk
+            for chunk in result["chunks"]
+            if not Path(chunk["normalization_dict_path"]).exists()
+        ]
+        if missing_normalization:
+            details = ", ".join(
+                f"chunk_{int(chunk['chunk_index']):03d}: {chunk['normalization_dict_path']}"
+                for chunk in missing_normalization
+            )
+            raise FileNotFoundError(
+                "Nimbus normalization_mode='prepared' requires existing normalization_dict.json files. "
+                f"Missing for {slide_id}: {details}. Run 'mif-pipeline nimbus-prepare' first, "
+                "or set nimbus.normalization_mode: per_slide to compute normalization during the per-slide run."
+            )
+
     Nimbus, MultiplexDataset = _import_nimbus()
     output_dir.mkdir(parents=True, exist_ok=True)
     chunk_csv_paths: list[Path] = []
@@ -444,13 +486,22 @@ def run_nimbus_chunked(
             segmentation_naming_convention=segmentation_naming_convention,
             output_dir=str(chunk_dir),
         )
-        dataset.prepare_normalization_dict(
-            quantile=float(nimbus.get("quantile", 0.999)),
-            n_subset=nimbus.get("n_subset", 50),
-            clip_values=tuple(nimbus.get("clip_values", [0, 2])),
-            multiprocessing=bool(nimbus.get("multiprocessing", True)),
-            overwrite=force,
-        )
+        if normalization_mode == "per_slide":
+            print(
+                f"[nimbus] normalization_mode=per_slide for {slide_id} "
+                f"chunk_{int(chunk_result['chunk_index']):03d}; computing normalization in {chunk_dir}",
+                flush=True,
+            )
+            dataset.prepare_normalization_dict(
+                quantile=float(nimbus.get("quantile", 0.999)),
+                n_subset=nimbus.get("n_subset", 50),
+                clip_values=tuple(nimbus.get("clip_values", [0, 2])),
+                multiprocessing=bool(nimbus.get("multiprocessing", True)),
+                overwrite=force,
+            )
+            chunk_result["normalization_status"] = "computed_per_slide"
+        else:
+            chunk_result["normalization_status"] = "prepared"
 
         nimbus_model = Nimbus(
             dataset=dataset,

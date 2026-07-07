@@ -1145,6 +1145,17 @@ def assemble_spatialdata(
         dry_run=False,
         return_sdata=False,
     )
+    if base_result.get("status") == "skipped" and not force:
+        result = dict(base_result)
+        result["stage"] = "assemble"
+        result["finalize_stage"] = None
+        result["message"] = (
+            "SpatialData store already exists, so assemble_spatialdata(force=False) did not mutate it. "
+            "Use finalize_spatialdata(...) to update an existing store, or rerun assemble_spatialdata(..., force=True) "
+            "to rebuild and finalize the store."
+        )
+        return result
+
     finalize_result = finalize_spatialdata(
         config,
         slide_id,

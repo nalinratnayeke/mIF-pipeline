@@ -14,6 +14,7 @@ ROUND_RE = re.compile(r"_R(\d{3})_")
 VERSION_ROUND_RE = re.compile(r"_(\d+)(?:\.\d+){1,2}_R\d{3}_")
 COMMON_DYES = {"DAPI", "FITC", "TRITC", "CY3", "CY5", "CY7", "AF488", "AF555", "AF647", "AF750"}
 SPATIALDATA_AGGREGATION_MODES = ("mean", "sum")
+NIMBUS_NORMALIZATION_MODES = ("prepared", "per_slide")
 SLIDE_DEFAULT_KEYS = (
     "pixel_size_um",
     "setup",
@@ -22,6 +23,7 @@ SLIDE_DEFAULT_KEYS = (
     "mask_export",
     "nimbus",
     "spatialdata",
+    "provenance",
 )
 
 
@@ -43,6 +45,7 @@ def load_config(config_path: Union[str, Path]) -> dict[str, Any]:
             "Keep only 'full_merge' and move the segmentation channel list to 'instanseg.channels'."
         )
     _validate_spatialdata_block(config.get("spatialdata"))
+    _validate_nimbus_block(config.get("nimbus"))
     if isinstance(config.get("nimbus"), dict) and "multislide" in config["nimbus"]:
         raise ValueError(
             "Legacy 'nimbus.multislide' config is no longer supported. "
@@ -63,6 +66,7 @@ def load_config(config_path: Union[str, Path]) -> dict[str, Any]:
             )
         if isinstance(slide, dict):
             _validate_spatialdata_block(slide.get("spatialdata"))
+            _validate_nimbus_block(slide.get("nimbus"))
 
     config["_meta"] = {
         "config_path": str(path),
@@ -89,11 +93,31 @@ def normalize_spatialdata_aggregation_mode(value: Any) -> str:
     return normalized
 
 
+def normalize_nimbus_normalization_mode(value: Any) -> str:
+    if value is None:
+        return "prepared"
+    normalized = str(value).strip().lower()
+    if normalized not in NIMBUS_NORMALIZATION_MODES:
+        allowed = ", ".join(repr(mode) for mode in NIMBUS_NORMALIZATION_MODES)
+        raise ValueError(
+            f"Nimbus normalization_mode must be one of {allowed}; got {value!r}."
+        )
+    return normalized
+
+
 def _validate_spatialdata_block(block: Any) -> None:
     if not isinstance(block, dict):
         return
     block["aggregation_mode"] = normalize_spatialdata_aggregation_mode(
         block.get("aggregation_mode")
+    )
+
+
+def _validate_nimbus_block(block: Any) -> None:
+    if not isinstance(block, dict):
+        return
+    block["normalization_mode"] = normalize_nimbus_normalization_mode(
+        block.get("normalization_mode")
     )
 
 
@@ -268,6 +292,7 @@ def get_slide_config(config: dict[str, Any], slide_id: str) -> dict[str, Any]:
 
     nimbus = resolved.get("nimbus")
     if isinstance(nimbus, dict) and nimbus.get("output_dir") is not None:
+        _validate_nimbus_block(nimbus)
         nimbus["output_dir"] = str(resolve_path(nimbus["output_dir"], output_dir))
 
     spatialdata = resolved.get("spatialdata")

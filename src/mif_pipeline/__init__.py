@@ -10,6 +10,7 @@ from .instanseg_runner import run_instanseg
 from .merge_ometiff import merge_slide_ometiffs
 from .nimbus_runner import prepare_nimbus_normalization, run_nimbus_chunked
 from .pipeline import run_all
+from .provenance import write_stage_run_records
 from .qc import qc_slide
 from .setup import refine_channel_map, setup_slide, setup_slides
 from .spatialdata_builder import (
@@ -39,4 +40,5 @@ __all__ = [
     "setup_slide",
     "setup_slides",
     "write_spatialdata_base",
+    "write_stage_run_records",
 ]

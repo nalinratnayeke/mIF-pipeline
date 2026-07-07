@@ -44,9 +44,11 @@ Important points:
 - `nimbus.channels` is the Nimbus channel subset.
 - `nimbus.output_dir` is always slide-local.
 - `nimbus.multislide` is no longer supported.
+- `nimbus.normalization_mode` defaults to `prepared`, which requires `nimbus-prepare` JSONs before per-slide Nimbus runs. Set it to `per_slide` only when you intentionally want single-slide normalization.
 - `spatialdata` writes the final canonical slide-local SpatialData store.
 - `spatialdata.aggregation_mode` controls raster intensity allocation and defaults to `mean`.
 - `spatialdata.derive_cytoplasm_labels` can derive an opt-in cytoplasm label layer from matching cell and nuclear instance IDs.
+- `provenance` controls per-slide run records written by the CLI.
 
 The most important per-slide fields are:
 
@@ -113,6 +115,19 @@ The per-slide Nimbus stage then writes:
 - `<slide output>/nimbus/chunk_XXX/nimbus_cell_table.csv`
 - `<slide output>/nimbus/cell_table_full.csv`
 
+By default, the per-slide Nimbus stage requires these prepared normalization JSONs to already exist. For exploratory or intentionally single-slide work, set `nimbus.normalization_mode: per_slide`; in that mode the Nimbus stage computes normalization inside each slide-local chunk folder.
+
+## Run Records
+
+CLI commands write a settings/run record into each affected slide output folder:
+
+- `<slide output>/run_records/<timestamp>_<command>.json`
+- `<slide output>/run_records/latest_<command>.json`
+
+Each record captures the command, original config path and hash, resolved slide config, configured channel map snapshot, runtime context, git commit/status, and the stage result dictionary. Dry-runs do not write records.
+
+Set `provenance.enabled: false` to disable records, or set `provenance.dirname` to change the folder name. `nimbus-prepare` writes one record per selected slide because its shared normalization settings affect every selected slide.
+
 ## IRIS / SLURM
 
 Use [scripts/run_pipeline.sh](/home/ratnayn/codex/mIF-pipeline/scripts/run_pipeline.sh) as the direct per-slide runner and [scripts/run_pipeline_parallel.sh](/home/ratnayn/codex/mIF-pipeline/scripts/run_pipeline_parallel.sh) as the SLURM submission wrapper.
@@ -121,7 +136,7 @@ Recommended flow:
 
 ```bash
 # 1. Interactive prep
-mif-pipeline setup --config prototyping/prototype_v2-Crop.yaml --slides SLIDE-0329_crop_2048,SLIDE-0329_crop_2048_2
+mif-pipeline setup --config prototyping/prototype_v2-Crop.yaml --slide SLIDE-0329_crop_2048 --slide SLIDE-0329_crop_2048_2
 mif-pipeline nimbus-prepare --config prototyping/prototype_v2-Crop.yaml --slides SLIDE-0329_crop_2048,SLIDE-0329_crop_2048_2
 
 # 2. Submit one job per slide
@@ -146,6 +161,8 @@ SpatialData assembly is intentionally separate from the InstanSeg/Nimbus environ
 2. `finalize_spatialdata(...)`
 
 `assemble_spatialdata(...)` remains available as a convenience wrapper when you do not need to inspect the base store separately.
+
+If the canonical store already exists, `assemble_spatialdata(..., force=False)` leaves it unchanged. Use `finalize_spatialdata(...)` to explicitly update an existing store, or use `assemble_spatialdata(..., force=True)` to rebuild and finalize it.
 
 The final store is the only canonical SpatialData artifact for a slide. During finalization, tables and optional shapes are appended into that same slide-local store.
 
