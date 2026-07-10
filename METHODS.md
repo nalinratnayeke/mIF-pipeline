@@ -122,6 +122,8 @@ This decision was made because the direct medium-mode workflow had already been 
 - merged OME-TIFF in
 - whole-cell and nuclear instance masks out
 
+The pipeline exposes `instanseg.tile_size` and `instanseg.batch_size` for medium-mode execution. It does not expose an overlap setting: `eval_medium_image()` determines its sliding-window overlap internally, so accepting an `instanseg.overlap` value would misleadingly imply that the pipeline can tune that behavior.
+
 ### Channel subset selection
 
 InstanSeg consumes a configured subset of channels defined by `instanseg.channels`. Those aliases are resolved against the channel map and then mapped to indices within `full_merge.ome.tif`. This lets segmentation operate on the canonical merged image without needing a second segmentation-specific merge artifact.

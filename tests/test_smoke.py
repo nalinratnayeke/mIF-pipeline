@@ -89,7 +89,6 @@ def write_config(tmp_path: Path) -> Path:
                     "model": "fluorescence_nuclei_and_cells",
                     "prediction_tag": "_instanseg_prediction",
                     "tile_size": 2048,
-                    "overlap": 100,
                     "resolve_cell_and_nucleus": True,
                     "cleanup_fragments": True,
                     "seed_threshold": 0.6,
@@ -224,7 +223,6 @@ def write_multislide_config(tmp_path: Path, *, mismatch: bool = False) -> Path:
             "model": "fluorescence_nuclei_and_cells",
             "prediction_tag": "_instanseg_prediction",
             "tile_size": 2048,
-            "overlap": 100,
             "resolve_cell_and_nucleus": True,
             "cleanup_fragments": True,
             "seed_threshold": 0.6,
@@ -435,6 +433,15 @@ def test_run_instanseg_writes_full_resolution_masks_in_medium_mode(tmp_path: Pat
             return DummyTensor(np.arange(2 * 4 * 4, dtype=np.int32).reshape(1, 2, 4, 4))
 
     monkeypatch.setattr(instanseg_runner_module, "_import_instanseg", lambda: DummyInstanSeg)
+    monkeypatch.setattr(
+        instanseg_runner_module,
+        "_import_skimage_resize",
+        lambda: lambda array, target_shape, **kwargs: np.repeat(
+            np.repeat(array, target_shape[0] // array.shape[0], axis=0),
+            target_shape[1] // array.shape[1],
+            axis=1,
+        ),
+    )
 
     result = instanseg_runner_module.run_instanseg(config, "SLIDE-0272")
 
@@ -461,6 +468,9 @@ def test_run_instanseg_writes_full_resolution_masks_in_medium_mode(tmp_path: Pat
     assert calls[0][2]["batch_size"] == 1
     assert calls[0][2]["return_image_tensor"] is False
     assert calls[0][2]["resolve_cell_and_nucleus"] is True
+    assert calls[0][2]["cleanup_fragments"] is True
+    assert calls[0][2]["seed_threshold"] == 0.6
+    assert result["eval_kwargs"]["seed_threshold"] == 0.6
 
 
 def test_run_instanseg_skips_when_masks_already_exist(tmp_path: Path):
@@ -932,6 +942,21 @@ def test_load_config_rejects_invalid_nimbus_normalization_mode(tmp_path: Path):
         assert "Nimbus normalization_mode" in str(exc)
     else:
         raise AssertionError("Expected invalid Nimbus normalization_mode to raise ValueError.")
+
+
+def test_load_config_rejects_instanseg_overlap(tmp_path: Path):
+    config_path = write_config(tmp_path)
+    raw = yaml.safe_load(config_path.read_text(encoding="utf-8"))
+    raw["slides"]["SLIDE-0272"]["instanseg"]["overlap"] = 100
+    config_path.write_text(yaml.safe_dump(raw), encoding="utf-8")
+
+    try:
+        load_config(config_path)
+    except ValueError as exc:
+        assert "instanseg.overlap is not supported" in str(exc)
+        assert "controls tile overlap internally" in str(exc)
+    else:
+        raise AssertionError("Expected instanseg.overlap to be rejected.")
 
 
 def test_setup_slides_generates_all_matching_channel_maps(tmp_path: Path):

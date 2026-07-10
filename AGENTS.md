@@ -201,6 +201,7 @@ ic.TiffSlide = TiffSlide
 ```
 
 - Keep the pipeline on forced `medium` processing unless the user explicitly requests a different mode.
+- Do not expose `instanseg.overlap` in the medium-mode config. `eval_medium_image()` controls sliding-window overlap internally; reject the unsupported setting instead of logging or silently ignoring it.
 - Do not make Zarr prediction output the primary segmentation artifact unless the user explicitly asks for that refactor.
 - Export masks as full-resolution tiled uint32 TIFFs.
 - When resizing labels, preserve integer instance IDs with nearest-neighbor behavior only.

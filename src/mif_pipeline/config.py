@@ -46,6 +46,7 @@ def load_config(config_path: Union[str, Path]) -> dict[str, Any]:
         )
     _validate_spatialdata_block(config.get("spatialdata"))
     _validate_nimbus_block(config.get("nimbus"))
+    _validate_instanseg_block(config.get("instanseg"))
     if isinstance(config.get("nimbus"), dict) and "multislide" in config["nimbus"]:
         raise ValueError(
             "Legacy 'nimbus.multislide' config is no longer supported. "
@@ -67,6 +68,7 @@ def load_config(config_path: Union[str, Path]) -> dict[str, Any]:
         if isinstance(slide, dict):
             _validate_spatialdata_block(slide.get("spatialdata"))
             _validate_nimbus_block(slide.get("nimbus"))
+            _validate_instanseg_block(slide.get("instanseg"), slide_id=str(slide_id))
 
     config["_meta"] = {
         "config_path": str(path),
@@ -118,6 +120,16 @@ def _validate_nimbus_block(block: Any) -> None:
         return
     block["normalization_mode"] = normalize_nimbus_normalization_mode(
         block.get("normalization_mode")
+    )
+
+
+def _validate_instanseg_block(block: Any, *, slide_id: str | None = None) -> None:
+    if not isinstance(block, dict) or "overlap" not in block:
+        return
+    location = f"slides.{slide_id}.instanseg.overlap" if slide_id else "instanseg.overlap"
+    raise ValueError(
+        f"{location} is not supported in the medium-mode pipeline. "
+        "InstanSeg eval_medium_image() controls tile overlap internally; remove this setting."
     )
 
 
@@ -255,6 +267,7 @@ def get_slide_config(config: dict[str, Any], slide_id: str) -> dict[str, Any]:
         if key in config
     }
     resolved = _deep_merge(shared_defaults, raw_slide)
+    _validate_instanseg_block(resolved.get("instanseg"), slide_id=slide_id)
     resolved["slide_id"] = slide_id
     resolved["slide_dir"] = str(slide_dir)
     resolved["output_dir"] = str(output_dir)

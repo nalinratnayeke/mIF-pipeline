@@ -41,6 +41,7 @@ Important points:
 
 - `full_merge` is the only persisted merged image artifact.
 - `instanseg.channels` is the segmentation channel subset.
+- Medium-mode InstanSeg tiling is configured through `instanseg.tile_size`; tile overlap is controlled internally by `eval_medium_image()` and `instanseg.overlap` is rejected.
 - `nimbus.channels` is the Nimbus channel subset.
 - `nimbus.output_dir` is always slide-local.
 - `nimbus.multislide` is no longer supported.

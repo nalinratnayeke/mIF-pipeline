@@ -20,7 +20,6 @@ instanseg:
   mode: medium
   prediction_tag: _instanseg_prediction_seed01
   tile_size: 1000
-  overlap: 100
   batch_size: 1
   resolve_cell_and_nucleus: true
   cleanup_fragments: true

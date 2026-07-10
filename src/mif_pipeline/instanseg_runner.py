@@ -230,7 +230,6 @@ def run_instanseg(
         "mode": mode,
         "model": instanseg_block.get("model", "fluorescence_nuclei_and_cells"),
         "tile_size": int(instanseg_block.get("tile_size", 2048)),
-        "overlap": int(instanseg_block.get("overlap", 100)),
         "batch_size": int(instanseg_block.get("batch_size", 1)),
         "pixel_size_um": float(slide["pixel_size_um"]),
         "prediction_tag": prediction_tag,
@@ -271,7 +270,7 @@ def run_instanseg(
     print(f"[instanseg] running {slide_id}", flush=True)
     print(
         f"[instanseg] mode={mode} image={ome_path} pixel_size_um={result['pixel_size_um']} "
-        f"tile_size={result['tile_size']} overlap={result['overlap']} batch_size={result['batch_size']}",
+        f"tile_size={result['tile_size']} batch_size={result['batch_size']}",
         flush=True,
     )
     print(f"[instanseg] prediction_tag={prediction_tag}", flush=True)
