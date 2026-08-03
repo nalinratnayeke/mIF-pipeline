@@ -10,6 +10,11 @@ Small, notebook-friendly pipeline for multiplex IF slides with explicit file art
 6. `assemble-spatialdata`: import the file artifacts into the final SpatialData store
 7. `qc`: run lightweight file and shape checks
 
+An additional opt-in `alignment-qc` command can be run against an already-completed SpatialData
+store. It is deliberately not part of `run_all()` or either shell runner's default stage list, so
+configs and datasets produced by the workflow above remain compatible with the current pipeline
+iteration.
+
 The intended IRIS workflow is:
 
 1. interactively generate channel maps
@@ -28,6 +33,7 @@ Active debugging notebooks live under [prototyping](/home/ratnayn/codex/mIF-pipe
 - [mif_pipeline_instanseg_nimbus_api_v1-Crop.ipynb](/home/ratnayn/codex/mIF-pipeline/prototyping/mif_pipeline_instanseg_nimbus_api_v1-Crop.ipynb)
 - [mif_pipeline_instanseg_nimbus_api_v1-fullslide.ipynb](/home/ratnayn/codex/mIF-pipeline/prototyping/mif_pipeline_instanseg_nimbus_api_v1-fullslide.ipynb)
 - [mif_pipeline_harpy_spatialdata_api_v1-Crop.ipynb](/home/ratnayn/codex/mIF-pipeline/prototyping/mif_pipeline_harpy_spatialdata_api_v1-Crop.ipynb)
+- [alignment_qc_two_round_validation.ipynb](prototyping/alignment_qc_two_round_validation.ipynb)
 
 Reference implementations and external snapshots live under [Reference](/home/ratnayn/codex/mIF-pipeline/Reference).
 
@@ -50,6 +56,9 @@ Important points:
 - `spatialdata.aggregation_mode` controls raster intensity allocation and defaults to `mean`.
 - `spatialdata.derive_cytoplasm_labels` can derive an opt-in cytoplasm label layer from matching cell and nuclear instance IDs.
 - `provenance` controls per-slide run records written by the CLI.
+- `alignment_qc`, when present and enabled, selects an ordered set of existing `full_image`
+  channels by exact alias and writes only alignment-QC-owned artifacts plus an additive
+  `alignment_qc` SpatialData table. It does not infer or change channel metadata.
 
 The most important per-slide fields are:
 
@@ -77,6 +86,7 @@ The public API is designed to be notebook-first:
 - `write_spatialdata_base(config, slide_id, ...) -> dict`
 - `finalize_spatialdata(config, slide_id, ...) -> dict`
 - `assemble_spatialdata(config, slide_id, ...) -> dict`
+- `run_alignment_qc(config, slide_id, ...) -> dict`
 - `qc_slide(config, slide_id) -> dict`
 
 Each function returns a small inspectable dictionary rather than a large in-memory object by default.
@@ -102,6 +112,7 @@ mif-pipeline merge --config example.yaml --slide SLIDE-0272
 mif-pipeline instanseg --config example.yaml --slide SLIDE-0272
 mif-pipeline nimbus --config example.yaml --slide SLIDE-0272
 mif-pipeline assemble-spatialdata --config example.yaml --slide SLIDE-0272
+mif-pipeline alignment-qc --config example.yaml --slide SLIDE-0272
 mif-pipeline qc --config example.yaml --slide SLIDE-0272
 ```
 
@@ -154,6 +165,33 @@ bash scripts/run_pipeline_parallel.sh \
 
 `run_pipeline_parallel.sh --plan-only` prints one `sbatch` command per slide and writes a small manifest under the batch log directory.
 
+### Optional alignment QC
+
+Alignment QC is post-processing for an existing canonical store. Configure exact aliases in their
+acquisition order, enable the block, and invoke it explicitly:
+
+```yaml
+alignment_qc:
+  enabled: true
+  reference_channel: R1_DAPI
+  channels: [R1_DAPI, R2_DAPI, R3_DAPI]
+  target_resolution_um: 2.6
+```
+
+```bash
+bash scripts/run_pipeline.sh \
+  --config example.yaml \
+  --slide SLIDE-0272 \
+  --stage alignment-qc
+```
+
+The stage does not interpret alias text: AF versus imaging selection is entirely determined by the
+aliases listed by the user. It reads `full_image` and `agg_cell_labels`, writes dense and cell-level
+artifacts under the slide-local `alignment_qc/` directory, and appends only the `alignment_qc`
+AnnData table to the existing SpatialData store. Upstream images, labels, tables, shapes, and
+transformations are not rewritten. Install OpenCV in the SpatialData environment with
+`pip install -e '.[alignment-qc]'`.
+
 ## SpatialData
 
 SpatialData assembly is intentionally separate from the InstanSeg/Nimbus environment. The current pattern is:
@@ -162,6 +200,12 @@ SpatialData assembly is intentionally separate from the InstanSeg/Nimbus environ
 2. `finalize_spatialdata(...)`
 
 `assemble_spatialdata(...)` remains available as a convenience wrapper when you do not need to inspect the base store separately.
+
+For local visual review and manual tumor annotation, use
+[`prototyping/cell_dive_lazy_spatialdata_napari_annotation.ipynb`](prototyping/cell_dive_lazy_spatialdata_napari_annotation.ipynb).
+It lazily opens selected single-channel Cell DIVE OME-TIFFs as separate napari-spatialdata layers,
+overlays the pipeline's whole-cell and nuclear masks, and round-trips tumor polygons through
+pixel-coordinate GeoJSON for import into the server-side canonical SpatialData store.
 
 If the canonical store already exists, `assemble_spatialdata(..., force=False)` leaves it unchanged. Use `finalize_spatialdata(...)` to explicitly update an existing store, or use `assemble_spatialdata(..., force=True)` to rebuild and finalize it.
 

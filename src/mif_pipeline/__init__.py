@@ -1,5 +1,6 @@
 """Public API for the mIF pipeline."""
 
+from .alignment_qc import run_alignment_qc
 from .config import (
     generate_channel_map,
     load_channel_map,
@@ -35,6 +36,7 @@ __all__ = [
     "qc_slide",
     "refine_channel_map",
     "run_all",
+    "run_alignment_qc",
     "run_instanseg",
     "run_nimbus_chunked",
     "setup_slide",

@@ -39,6 +39,7 @@ Stage names:
   instanseg
   nimbus
   spatialdata
+  alignment-qc
   qc
 
 Default stages:
@@ -153,7 +154,7 @@ activate_env_if_needed() {
 stage_env() {
   local stage="$1"
   case "${stage}" in
-    spatialdata)
+    spatialdata|alignment-qc)
       printf '%s\n' "${SPATIALDATA_ENV}"
       ;;
     setup|merge|instanseg|nimbus|qc)
@@ -241,7 +242,7 @@ run_python_cli() {
 validate_stage() {
   local stage="$1"
   case "${stage}" in
-    setup|merge|instanseg|nimbus|spatialdata|qc)
+    setup|merge|instanseg|nimbus|spatialdata|alignment-qc|qc)
       ;;
     *)
       echo "Unknown stage: ${stage}" >&2
@@ -357,7 +358,7 @@ for stage_name in "${STAGES[@]}"; do
     logged_job_context=1
   fi
   case "${stage_name}" in
-    setup|merge|instanseg|spatialdata|qc)
+    setup|merge|instanseg|spatialdata|alignment-qc|qc)
       for slide_id in "${SLIDE_IDS[@]}"; do
         cli_stage="${stage_name}"
         if [[ "${stage_name}" == "spatialdata" ]]; then

@@ -14,6 +14,9 @@ The current supported workflow is:
 6. `assemble-spatialdata`: build and finalize the canonical slide-local SpatialData store
 7. `qc`: run lightweight file and shape checks
 
+An optional explicit-only `alignment-qc` post-processing stage may run after a completed
+SpatialData store. It is not part of `run_all()` or the shell runners' default stage lists.
+
 The intended cluster model is:
 
 - interactive prep in notebooks or Python API for `setup` and `nimbus-prepare`
@@ -21,6 +24,10 @@ The intended cluster model is:
 - explicit restart by resubmitting that slide with a chosen stage list
 
 Do not reintroduce the old multislide Nimbus output root, chunk-group SLURM graph, or `seg_merge` artifact unless the user explicitly requests that rollback.
+
+Treat the current upstream pipeline behavior and artifacts as the compatibility baseline for
+already-processed datasets. Alignment QC must not change channel-map schemas, rerun upstream
+stages, rebuild the canonical store, or rewrite unrelated SpatialData elements or transformations.
 
 ## Reference Materials
 
@@ -68,6 +75,7 @@ These are now deliberate and should be preserved unless the user asks for a chan
 - `scripts/run_pipeline_parallel.sh` is the per-slide SLURM submission wrapper.
 - The wrapper should submit one job per slide, not a dependency graph across chunk groups.
 - Recovery should remain “rerun the slide with an explicit stage list”.
+- The optional `alignment-qc` wrapper stage uses the SpatialData environment but must not be added to either runner's default stage list.
 
 ## Config Expectations
 
@@ -100,6 +108,8 @@ Important config rules:
 - validate `spatialdata.aggregation_mode` against the supported `mean` / `sum` options
 - keep cytoplasm derivation opt-in through `spatialdata.derive_cytoplasm_labels`
 - keep run-record provenance as slide-local CLI sidecars under `run_records/` by default; do not add it as a separate stage
+- keep `alignment_qc` optional and explicit-only; configs without the block must retain their current resolved behavior
+- keep alignment channel selection alias-only and ordered by `alignment_qc.channels`; do not migrate channel maps or infer AF/imaging metadata
 
 The `setup` block may also define post-generation refinement rules:
 
@@ -145,6 +155,7 @@ The main public functions are:
 - `assemble_spatialdata(config, slide_id, ...) -> dict`
 - `qc_slide(config, slide_id) -> dict`
 - `run_all(config, slide_id) -> dict`
+- `run_alignment_qc(config, slide_id, ...) -> dict`
 
 ## CLI Expectations
 
@@ -161,6 +172,7 @@ Supported subcommands:
 - `assemble-spatialdata`
 - `qc`
 - `dry-run`
+- `alignment-qc` (explicit post-processing only)
 
 Important:
 

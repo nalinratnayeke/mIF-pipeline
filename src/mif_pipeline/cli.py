@@ -6,6 +6,7 @@ import sys
 from pathlib import Path
 from typing import Any, Callable, Optional
 
+from .alignment_qc import run_alignment_qc
 from .config import load_config
 from .instanseg_runner import run_instanseg
 from .merge_ometiff import merge_slide_ometiffs
@@ -142,6 +143,17 @@ def build_parser() -> argparse.ArgumentParser:
     )
     _add_common_arguments(assemble_parser)
 
+    alignment_parser = subparsers.add_parser(
+        "alignment-qc",
+        help="Run alias-selected optical-flow QC against an existing canonical SpatialData store.",
+    )
+    _add_common_arguments(alignment_parser)
+    alignment_parser.add_argument(
+        "--dry-run",
+        action="store_true",
+        help="Resolve and validate the alignment-QC plan without reading or writing SpatialData.",
+    )
+
     qc_parser = subparsers.add_parser("qc", help="Run lightweight QC checks.")
     _add_common_arguments(qc_parser, include_force=False)
 
@@ -181,6 +193,13 @@ def main(argv: Optional[list[str]] = None) -> int:
             config,
             args.slide,
             force=args.force,
+            return_sdata=False,
+        ),
+        "alignment-qc": lambda: run_alignment_qc(
+            config,
+            args.slide,
+            force=args.force,
+            dry_run=args.dry_run,
             return_sdata=False,
         ),
         "qc": lambda: qc_slide(config, args.slide),

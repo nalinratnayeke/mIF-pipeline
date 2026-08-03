@@ -9,6 +9,7 @@ from .config import (
     get_slide_config,
     resolve_nimbus_channel_entries,
 )
+from .alignment_qc import _alignment_paths
 
 
 def _import_tifffile():
@@ -47,6 +48,7 @@ def qc_slide(config: Union[dict[str, Any], str, Path], slide_id: str) -> dict[st
     mask_export = slide.get("mask_export") or {}
     nimbus_block = slide.get("nimbus") or {}
     spatialdata_block = slide.get("spatialdata") or {}
+    alignment_qc_block = slide.get("alignment_qc") or {}
 
     if full_merge.get("enabled", False):
         full_path = Path(full_merge["ome_path"])
@@ -121,6 +123,56 @@ def qc_slide(config: Union[dict[str, Any], str, Path], slide_id: str) -> dict[st
     if spatialdata_block.get("enabled", False):
         spatialdata_store = Path(spatialdata_block["store_path"])
         add_check("spatialdata_store_exists", spatialdata_store.exists(), str(spatialdata_store))
+
+    # Alignment QC is strictly opt-in so legacy configs retain the exact existing check set.
+    if alignment_qc_block.get("enabled", False):
+        paths = _alignment_paths(slide)
+        add_check("alignment_qc_zarr_exists", paths["zarr_path"].exists(), str(paths["zarr_path"]))
+        add_check("alignment_qc_summary_exists", paths["summary_path"].exists(), str(paths["summary_path"]))
+        if alignment_qc_block.get("save_dense_maps", True):
+            dense_metric_names = (
+                "flow_x_um",
+                "flow_y_um",
+                "displacement_um",
+                "absolute_residual",
+                "structural_residual",
+            )
+            expected_dense_paths = [
+                paths["zarr_path"] / "dense" / f"round_{index:03d}" / metric
+                for index, _alias in enumerate(alignment_qc_block.get("channels", []))
+                for metric in dense_metric_names
+            ]
+            add_check(
+                "alignment_qc_dense_maps_exist",
+                bool(expected_dense_paths) and all(path.exists() for path in expected_dense_paths),
+                f"{len(expected_dense_paths)} expected arrays in {paths['zarr_path'] / 'dense'}",
+            )
+        manifest_ok = False
+        manifest_detail = str(paths["manifest_path"])
+        if paths["manifest_path"].exists():
+            try:
+                import json
+
+                with paths["manifest_path"].open("r", encoding="utf-8") as handle:
+                    manifest = json.load(handle)
+                expected_channels = [str(alias) for alias in alignment_qc_block.get("channels", [])]
+                completed = [int(value) for value in manifest.get("completed_indices", [])]
+                expected_indices = list(range(len(expected_channels)))
+                table_expected = bool(alignment_qc_block.get("write_spatialdata_table", True))
+                table_ok = not table_expected or bool(manifest.get("spatialdata_table_written", False))
+                manifest_ok = (
+                    bool(manifest.get("complete", False))
+                    and completed == expected_indices
+                    and list((manifest.get("settings") or {}).get("channels", [])) == expected_channels
+                    and table_ok
+                )
+                manifest_detail = (
+                    f"complete={manifest.get('complete')}, completed={completed}, "
+                    f"table_written={manifest.get('spatialdata_table_written')}"
+                )
+            except Exception as exc:
+                manifest_detail = f"{paths['manifest_path']}: {type(exc).__name__}: {exc}"
+        add_check("alignment_qc_manifest_complete", manifest_ok, manifest_detail)
 
     return {
         "slide_id": slide_id,

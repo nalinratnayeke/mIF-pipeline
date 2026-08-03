@@ -19,6 +19,9 @@ dependencies = [
 ]
 
 [project.optional-dependencies]
+alignment-qc = [
+  "opencv-python-headless>=4.8",
+]
 dev = [
   "pytest",
 ]

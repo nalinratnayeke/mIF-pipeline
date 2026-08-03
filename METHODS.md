@@ -13,6 +13,11 @@ The current processing sequence is:
 5. SpatialData assembly, aggregation, and optional vectorization
 6. lightweight QC
 
+An optional optical-flow alignment-QC operation can be applied after this completed sequence. It
+is an additive post-processing command rather than a default pipeline stage. The implementation
+treats outputs produced by the sequence above as authoritative and does not rerun or rewrite any
+preceding stage.
+
 The canonical outputs for each slide are:
 
 - one merged OME-TIFF
@@ -283,6 +288,29 @@ Slide-local run records support this restart model by preserving the settings us
 next to the generated outputs. When a slide is resumed from a later stage, the output folder can
 still show which config, channel map, stage list, and runtime context produced the existing upstream
 artifacts.
+
+### Optional optical-flow alignment QC
+
+For longitudinal DAPI alignment assessment, an explicit ordered alias list selects channels from
+the existing canonical `full_image`; alias text is not parsed and the channel map is not migrated.
+Every moving channel is compared directly with the configured reference using dense Farnebäck
+flow at a selected existing pyramid level. Images are independently percentile-normalized for flow
+and residual calculations. The moving image is warped into reference coordinates, after which the
+pipeline records signed physical displacement, displacement magnitude, absolute intensity
+residual, and local structural dissimilarity. A separate local raw-intensity ratio retains evidence
+of DAPI support that independent normalization could obscure.
+
+Cell centers from the existing `agg_cell_labels` table are projected onto the flow grid. Dense
+fields are summarized with a nanmedian over a physical-radius neighborhood, so the pixel window
+adapts to the selected level's actual x/y resolution. Dense maps and cell-by-channel checkpoints
+are stored in a compressed slide-local Zarr artifact, while an additive `alignment_qc` AnnData
+table is written into the canonical SpatialData store. The nonlinear flow is not represented as an
+affine SpatialData transformation.
+
+Compatibility with already-processed slides is an explicit constraint: `run_all()`, default shell
+stage lists, channel-map schemas, upstream artifacts, existing SpatialData elements, and stored
+transformations are unchanged. The command runs only when requested, and force mode is scoped to
+alignment-QC-owned artifacts and its one table element.
 
 ## Cluster Execution Considerations
 

@@ -23,6 +23,7 @@ SLIDE_DEFAULT_KEYS = (
     "mask_export",
     "nimbus",
     "spatialdata",
+    "alignment_qc",
     "provenance",
 )
 
@@ -45,6 +46,7 @@ def load_config(config_path: Union[str, Path]) -> dict[str, Any]:
             "Keep only 'full_merge' and move the segmentation channel list to 'instanseg.channels'."
         )
     _validate_spatialdata_block(config.get("spatialdata"))
+    _validate_alignment_qc_block(config.get("alignment_qc"), require_selection=False)
     _validate_nimbus_block(config.get("nimbus"))
     _validate_instanseg_block(config.get("instanseg"))
     if isinstance(config.get("nimbus"), dict) and "multislide" in config["nimbus"]:
@@ -67,6 +69,11 @@ def load_config(config_path: Union[str, Path]) -> dict[str, Any]:
             )
         if isinstance(slide, dict):
             _validate_spatialdata_block(slide.get("spatialdata"))
+            _validate_alignment_qc_block(
+                slide.get("alignment_qc"),
+                slide_id=str(slide_id),
+                require_selection=False,
+            )
             _validate_nimbus_block(slide.get("nimbus"))
             _validate_instanseg_block(slide.get("instanseg"), slide_id=str(slide_id))
 
@@ -131,6 +138,80 @@ def _validate_instanseg_block(block: Any, *, slide_id: str | None = None) -> Non
         f"{location} is not supported in the medium-mode pipeline. "
         "InstanSeg eval_medium_image() controls tile overlap internally; remove this setting."
     )
+
+
+def _validate_alignment_qc_block(
+    block: Any,
+    *,
+    slide_id: str | None = None,
+    require_selection: bool = True,
+) -> None:
+    """Validate only the opt-in alignment-QC block.
+
+    Keeping this validation conditional preserves the resolved configuration and behavior of
+    existing configs that predate the additive alignment-QC stage.
+    """
+    if not isinstance(block, dict) or not block.get("enabled", False):
+        return
+
+    location = f"slides.{slide_id}.alignment_qc" if slide_id else "alignment_qc"
+    reference = block.get("reference_channel")
+    channels = block.get("channels")
+    if require_selection and (not isinstance(reference, str) or not reference.strip()):
+        raise ValueError(f"{location}.reference_channel must be a non-empty alias when enabled.")
+    if require_selection and (not isinstance(channels, list) or not channels):
+        raise ValueError(f"{location}.channels must be a non-empty ordered alias list when enabled.")
+    if channels is not None and not isinstance(channels, list):
+        raise ValueError(f"{location}.channels must be an ordered alias list.")
+    aliases = None if channels is None else [str(alias) for alias in channels]
+    if aliases is not None:
+        if any(not alias.strip() for alias in aliases):
+            raise ValueError(f"{location}.channels may not contain empty aliases.")
+        if len(set(aliases)) != len(aliases):
+            raise ValueError(f"{location}.channels may not contain duplicate aliases.")
+    if reference is not None and (not isinstance(reference, str) or not reference.strip()):
+        raise ValueError(f"{location}.reference_channel must be a non-empty alias.")
+    if reference is not None and aliases is not None and reference not in aliases:
+        raise ValueError(f"{location}.reference_channel must also appear in {location}.channels.")
+
+    pyramid_level = block.get("pyramid_level")
+    target_resolution = block.get("target_resolution_um", 2.6)
+    if pyramid_level is not None and block.get("target_resolution_um") is not None:
+        raise ValueError(
+            f"{location} may define only one of pyramid_level or target_resolution_um; "
+            "set target_resolution_um to null when selecting a level explicitly."
+        )
+    if pyramid_level is None and target_resolution is None:
+        raise ValueError(f"{location} must define pyramid_level or target_resolution_um when enabled.")
+    if pyramid_level is not None and int(pyramid_level) < 0:
+        raise ValueError(f"{location}.pyramid_level must be non-negative.")
+    if target_resolution is not None and float(target_resolution) <= 0:
+        raise ValueError(f"{location}.target_resolution_um must be positive.")
+
+    lower = float(block.get("lower_percentile", 1.0))
+    upper = float(block.get("upper_percentile", 99.9))
+    if not 0 <= lower < upper <= 100:
+        raise ValueError(
+            f"{location} percentile bounds must satisfy 0 <= lower_percentile < upper_percentile <= 100."
+        )
+    radius = float(block.get("cell_sampling_radius_um", 2.6))
+    if radius < 0:
+        raise ValueError(f"{location}.cell_sampling_radius_um must be non-negative.")
+    win_size = int(block.get("ssim_window_size", 11))
+    if win_size < 3 or win_size % 2 == 0:
+        raise ValueError(f"{location}.ssim_window_size must be an odd integer >= 3.")
+    chunks = block.get("dense_chunks", [512, 512])
+    if (
+        not isinstance(chunks, (list, tuple))
+        or len(chunks) != 2
+        or any(int(value) <= 0 for value in chunks)
+    ):
+        raise ValueError(f"{location}.dense_chunks must contain two positive integers.")
+    flow = block.get("optical_flow") or {}
+    if not isinstance(flow, dict):
+        raise ValueError(f"{location}.optical_flow must be a mapping.")
+    if str(flow.get("method", "farneback")).strip().lower() != "farneback":
+        raise ValueError(f"{location}.optical_flow.method currently supports only 'farneback'.")
 
 
 def _deep_merge(base: Any, override: Any) -> Any:
@@ -334,6 +415,13 @@ def get_slide_config(config: dict[str, Any], slide_id: str) -> dict[str, Any]:
                 "SpatialData store in place. Remove those keys and keep only 'spatialdata.suffix' or "
                 "'spatialdata.store_path'."
             )
+
+    alignment_qc = resolved.get("alignment_qc")
+    if isinstance(alignment_qc, dict):
+        _validate_alignment_qc_block(alignment_qc, slide_id=slide_id)
+        alignment_qc["output_dir"] = str(
+            resolve_path(alignment_qc.get("output_dir", "alignment_qc"), output_dir)
+        )
 
     return resolved
 

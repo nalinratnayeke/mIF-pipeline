@@ -79,6 +79,33 @@ spatialdata:
   # This stage is intended to run in a modern Harpy + SpatialData environment
   # after merge / InstanSeg / optional Nimbus file artifacts already exist.
 
+# Optional post-processing against an already-completed canonical SpatialData store.
+# This stage is explicit-only and does not alter or rerun any upstream stage.
+alignment_qc:
+  enabled: false
+  output_dir: alignment_qc
+  # Exact existing aliases in acquisition order; no alias metadata is inferred or changed.
+  reference_channel: null
+  channels: []
+  target_resolution_um: 2.6
+  pyramid_level: null
+  lower_percentile: 1.0
+  upper_percentile: 99.9
+  optical_flow:
+    method: farneback
+    pyr_scale: 0.5
+    levels: 3
+    winsize: 21
+    iterations: 3
+    poly_n: 7
+    poly_sigma: 1.5
+    flags: 0
+  ssim_window_size: 11
+  cell_sampling_radius_um: 2.6
+  dense_chunks: [512, 512]
+  save_dense_maps: true
+  write_spatialdata_table: true
+
 provenance:
   enabled: true
   dirname: run_records

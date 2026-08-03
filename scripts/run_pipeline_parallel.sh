@@ -62,6 +62,7 @@ Stage names:
   instanseg
   nimbus
   spatialdata
+  alignment-qc
   qc
 
 Default stages:
@@ -76,6 +77,11 @@ Examples:
     --config prototyping/prototype_v2-fullslide.yaml \
     --slide SLIDE-0329 \
     --stage nimbus --stage spatialdata --stage qc
+
+  bash scripts/run_pipeline_parallel.sh \
+    --config prototyping/prototype_v2-fullslide.yaml \
+    --slide SLIDE-0329 \
+    --stage alignment-qc
 EOF
 }
 
@@ -118,7 +124,7 @@ parse_csv_into_array() {
 validate_stage() {
   local stage="$1"
   case "${stage}" in
-    merge|instanseg|nimbus|spatialdata|qc)
+    merge|instanseg|nimbus|spatialdata|alignment-qc|qc)
       ;;
     *)
       echo "Unknown stage: ${stage}" >&2
