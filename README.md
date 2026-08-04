@@ -34,6 +34,7 @@ Active debugging notebooks live under [prototyping](/home/ratnayn/codex/mIF-pipe
 - [mif_pipeline_instanseg_nimbus_api_v1-fullslide.ipynb](/home/ratnayn/codex/mIF-pipeline/prototyping/mif_pipeline_instanseg_nimbus_api_v1-fullslide.ipynb)
 - [mif_pipeline_harpy_spatialdata_api_v1-Crop.ipynb](/home/ratnayn/codex/mIF-pipeline/prototyping/mif_pipeline_harpy_spatialdata_api_v1-Crop.ipynb)
 - [alignment_qc_two_round_validation.ipynb](prototyping/alignment_qc_two_round_validation.ipynb)
+- [alignment_qc_zncc_validation_v2.ipynb](prototyping/alignment_qc_zncc_validation_v2.ipynb)
 
 Reference implementations and external snapshots live under [Reference](/home/ratnayn/codex/mIF-pipeline/Reference).
 
