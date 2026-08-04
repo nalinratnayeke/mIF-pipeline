@@ -274,6 +274,33 @@ def test_zncc_masks_uniform_regions_and_chunking_has_no_seams(fake_cv2):
     )
 
 
+def test_zncc_scores_comparison_tissue_loss_from_reference_support(fake_cv2):
+    rng = np.random.default_rng(21)
+    reference = rng.normal(size=(31, 33)).astype(np.float32)
+    comparison = np.zeros_like(reference)
+    result = dense_local_zncc(
+        reference,
+        comparison,
+        window_shape=(9, 9),
+        chunk_shape=(10, 11),
+    )
+
+    interior = np.s_[4:-4, 4:-4]
+    assert result["reference_support"][interior].all()
+    assert not result["comparison_support"][interior].any()
+    assert result["comparison_low_variance_mask"][interior].all()
+    np.testing.assert_allclose(result["zncc_correlation"][interior], 0)
+    np.testing.assert_allclose(result["zncc_residual"][interior], 1)
+
+    reversed_result = dense_local_zncc(
+        comparison,
+        reference,
+        window_shape=(9, 9),
+        chunk_shape=(10, 11),
+    )
+    assert not reversed_result["valid_mask"].any()
+
+
 def test_sampling_and_pyramid_resolution_helpers():
     level0 = xr.DataArray(
         np.zeros((2, 80, 100)), dims=("c", "y", "x"), coords={"c": ["a", "b"]}

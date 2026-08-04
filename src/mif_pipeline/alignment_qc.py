@@ -15,6 +15,7 @@ from .config import ensure_config, get_slide_config, resolve_channel_entries
 METRIC_NAMES = ("zncc_correlation", "zncc_residual")
 DENSE_METRIC_NAMES = METRIC_NAMES
 ALIGNMENT_QC_SCHEMA_VERSION = 1
+ZNCC_SUPPORT_POLICY = "reference_supported_zero_for_comparison_low_variance"
 
 
 def _import_numpy():
@@ -116,6 +117,7 @@ def _resolved_settings(block: Mapping[str, Any]) -> dict[str, Any]:
         "zncc_window_size_um": float(block.get("zncc_window_size_um", 75.0)),
         "scaling_percentiles": [float(percentiles[0]), float(percentiles[1])],
         "min_local_std_fraction": float(block.get("min_local_std_fraction", 0.005)),
+        "support_policy": ZNCC_SUPPORT_POLICY,
         "cell_sampling_radius_um": float(block.get("cell_sampling_radius_um", 2.6)),
         "dense_chunks": [int(value) for value in block.get("dense_chunks", [1024, 1024])],
         "save_dense_maps": bool(block.get("save_dense_maps", True)),
@@ -276,6 +278,8 @@ def dense_local_zncc(
     radius_y, radius_x = window_y // 2, window_x // 2
     window_area = float(window_y * window_x)
     correlation = np.full(ref.shape, np.nan, dtype=np.float32)
+    reference_support = np.zeros(ref.shape, dtype=bool)
+    comparison_support = np.zeros(ref.shape, dtype=bool)
 
     def box_sum(values: Any) -> Any:
         return cv2.boxFilter(
@@ -310,13 +314,19 @@ def dense_local_zncc(
             std_ref = np.sqrt(variance_ref / window_area)
             std_moving = np.sqrt(variance_moving / window_area)
             denominator = np.sqrt(variance_ref * variance_moving)
-            valid = (
-                (std_ref >= float(minimum_local_std_fraction))
-                & (std_moving >= float(minimum_local_std_fraction))
-                & (denominator > 0)
+            local_reference_support = (
+                (std_ref >= float(minimum_local_std_fraction)) & (variance_ref > 0)
             )
+            local_comparison_support = (
+                (std_moving >= float(minimum_local_std_fraction)) & (variance_moving > 0)
+            )
+            computable = local_reference_support & local_comparison_support & (denominator > 0)
             local_correlation = np.full(local_ref.shape, np.nan, dtype=np.float64)
-            local_correlation[valid] = covariance[valid] / denominator[valid]
+            local_correlation[computable] = covariance[computable] / denominator[computable]
+            # A locally flat comparison cannot produce a mathematical correlation. When the
+            # reference is informative, treat that condition as complete loss of matching
+            # structure rather than excluding the neighborhood from QC.
+            local_correlation[local_reference_support & ~computable] = 0.0
 
             core_y = slice(y0 - ey0, y1 - ey0)
             core_x = slice(x0 - ex0, x1 - ex0)
@@ -329,15 +339,22 @@ def dense_local_zncc(
                 & (global_x >= radius_x)
                 & (global_x < width - radius_x)
             )
-            core = np.where(interior, np.clip(core, -1.0, 1.0), np.nan)
+            core_reference_support = interior & local_reference_support[core_y, core_x]
+            core_comparison_support = interior & local_comparison_support[core_y, core_x]
+            core = np.where(core_reference_support, np.clip(core, -1.0, 1.0), np.nan)
             correlation[y0:y1, x0:x1] = core.astype(np.float32)
+            reference_support[y0:y1, x0:x1] = core_reference_support
+            comparison_support[y0:y1, x0:x1] = core_comparison_support
 
     residual = (1.0 - np.clip(correlation, 0.0, 1.0)).astype(np.float32)
     residual[~np.isfinite(correlation)] = np.nan
     return {
         "zncc_correlation": correlation,
         "zncc_residual": residual,
-        "valid_mask": np.isfinite(correlation),
+        "valid_mask": reference_support,
+        "reference_support": reference_support,
+        "comparison_support": comparison_support,
+        "comparison_low_variance_mask": reference_support & ~comparison_support,
     }
 
 
@@ -705,6 +722,12 @@ def _channel_summary(
     correlation = np.asarray(maps["zncc_correlation"], dtype=float)
     valid_dense = np.isfinite(correlation)
     cell_correlation = np.asarray(cell_values["zncc_correlation"], dtype=float)
+    low_variance = maps.get("comparison_low_variance_mask")
+    low_variance_fraction = 0.0
+    if low_variance is not None and valid_dense.any():
+        low_variance_fraction = float(
+            np.mean(np.asarray(low_variance, dtype=bool)[valid_dense])
+        )
     return {
         "channel_alias": alias,
         "acquisition_order": int(index),
@@ -712,6 +735,7 @@ def _channel_summary(
         **dict(scaling),
         "valid_dense_fraction": float(np.mean(valid_dense)),
         "valid_cell_fraction": float(np.mean(np.isfinite(cell_correlation))),
+        "comparison_low_variance_fraction_within_reference_support": low_variance_fraction,
         "p05_zncc_correlation": _finite_percentile(correlation, 5),
         "median_zncc_correlation": _finite_percentile(correlation, 50),
         "median_zncc_residual": _finite_percentile(maps["zncc_residual"], 50),
@@ -1008,6 +1032,9 @@ def run_alignment_qc(
             maps = {
                 "zncc_correlation": np.ones(reference_scaled.shape, dtype=np.float32),
                 "zncc_residual": np.zeros(reference_scaled.shape, dtype=np.float32),
+                "reference_support": np.ones(reference_scaled.shape, dtype=bool),
+                "comparison_support": np.ones(reference_scaled.shape, dtype=bool),
+                "comparison_low_variance_mask": np.zeros(reference_scaled.shape, dtype=bool),
             }
         else:
             moving_raw = _materialize_channel(level_array, alias)

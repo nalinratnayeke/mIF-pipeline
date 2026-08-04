@@ -304,9 +304,11 @@ Cell centers from the existing `agg_cell_labels` table are projected onto the ZN
 fields are summarized with a nanmedian over a physical-radius neighborhood, so the pixel window
 adapts to the selected level's actual x/y resolution. Dense maps and cell-by-channel checkpoints
 are stored in a compressed slide-local Zarr artifact, while an additive `alignment_qc` AnnData
-table is written into the canonical SpatialData store. Locally uniform neighborhoods and the
-explicit half-window image border are undefined and stored as `NaN`; no dark-intensity mask is
-used.
+table is written into the canonical SpatialData store. Reference neighborhoods without local
+structure and the explicit half-window image border are undefined and stored as `NaN`. If the
+reference is informative but the comparison is locally flat, the operational QC score is set to
+correlation zero and residual one so tissue loss or severe blur is not discarded as invalid. No
+dark-intensity mask is used.
 
 Compatibility with already-processed slides is an explicit constraint: `run_all()`, default shell
 stage lists, channel-map schemas, upstream artifacts, existing SpatialData elements, and stored

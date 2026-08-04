@@ -191,8 +191,10 @@ bash scripts/run_pipeline.sh \
 The stage does not interpret alias text: AF versus imaging selection is entirely determined by the
 aliases listed by the user. It calculates dense pre-alignment local ZNCC without correcting the
 images, then stores continuous `zncc_correlation` and `zncc_residual` values densely and around
-the detected cell centers. Low-information neighborhoods and the explicit ZNCC border are `NaN`;
-no intensity mask, pass/fail threshold, or cell exclusion is applied.
+the detected cell centers. Reference neighborhoods without structure and the explicit ZNCC border
+are `NaN`. When the reference is informative but the comparison is locally flat, the stage assigns
+correlation `0` and residual `1` so tissue loss or severe blur remains scorable. No intensity mask,
+pass/fail threshold, or cell exclusion is applied.
 
 Artifacts are written under the slide-local `alignment_qc/` directory, and only the additive
 `alignment_qc` AnnData table is written to the existing SpatialData store. Upstream images,
