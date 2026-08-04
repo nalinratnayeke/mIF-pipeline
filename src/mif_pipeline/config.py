@@ -15,6 +15,21 @@ VERSION_ROUND_RE = re.compile(r"_(\d+)(?:\.\d+){1,2}_R\d{3}_")
 COMMON_DYES = {"DAPI", "FITC", "TRITC", "CY3", "CY5", "CY7", "AF488", "AF555", "AF647", "AF750"}
 SPATIALDATA_AGGREGATION_MODES = ("mean", "sum")
 NIMBUS_NORMALIZATION_MODES = ("prepared", "per_slide")
+ALIGNMENT_QC_KEYS = {
+    "enabled",
+    "output_dir",
+    "reference_channel",
+    "channels",
+    "target_resolution_um",
+    "pyramid_level",
+    "zncc_window_size_um",
+    "scaling_percentiles",
+    "min_local_std_fraction",
+    "cell_sampling_radius_um",
+    "dense_chunks",
+    "save_dense_maps",
+    "write_spatialdata_table",
+}
 SLIDE_DEFAULT_KEYS = (
     "pixel_size_um",
     "setup",
@@ -146,20 +161,21 @@ def _validate_alignment_qc_block(
     slide_id: str | None = None,
     require_selection: bool = True,
 ) -> None:
-    """Validate only the opt-in alignment-QC block.
-
-    Keeping this validation conditional preserves the resolved configuration and behavior of
-    existing configs that predate the additive alignment-QC stage.
-    """
-    if not isinstance(block, dict) or not block.get("enabled", False):
+    """Validate the self-contained alignment-QC block when it is present."""
+    if not isinstance(block, dict):
         return
 
     location = f"slides.{slide_id}.alignment_qc" if slide_id else "alignment_qc"
+    unsupported = sorted(set(block) - ALIGNMENT_QC_KEYS)
+    if unsupported:
+        raise ValueError(f"{location} contains unsupported keys: {', '.join(unsupported)}.")
+
+    enabled = bool(block.get("enabled", False))
     reference = block.get("reference_channel")
     channels = block.get("channels")
-    if require_selection and (not isinstance(reference, str) or not reference.strip()):
+    if enabled and require_selection and (not isinstance(reference, str) or not reference.strip()):
         raise ValueError(f"{location}.reference_channel must be a non-empty alias when enabled.")
-    if require_selection and (not isinstance(channels, list) or not channels):
+    if enabled and require_selection and (not isinstance(channels, list) or not channels):
         raise ValueError(f"{location}.channels must be a non-empty ordered alias list when enabled.")
     if channels is not None and not isinstance(channels, list):
         raise ValueError(f"{location}.channels must be an ordered alias list.")
@@ -188,30 +204,30 @@ def _validate_alignment_qc_block(
     if target_resolution is not None and float(target_resolution) <= 0:
         raise ValueError(f"{location}.target_resolution_um must be positive.")
 
-    lower = float(block.get("lower_percentile", 1.0))
-    upper = float(block.get("upper_percentile", 99.9))
+    percentiles = block.get("scaling_percentiles", [1.0, 99.9])
+    if not isinstance(percentiles, (list, tuple)) or len(percentiles) != 2:
+        raise ValueError(f"{location}.scaling_percentiles must contain two numbers.")
+    lower, upper = (float(value) for value in percentiles)
     if not 0 <= lower < upper <= 100:
         raise ValueError(
-            f"{location} percentile bounds must satisfy 0 <= lower_percentile < upper_percentile <= 100."
+            f"{location}.scaling_percentiles must satisfy 0 <= lower < upper <= 100."
         )
+    window_size = float(block.get("zncc_window_size_um", 75.0))
+    if window_size <= 0:
+        raise ValueError(f"{location}.zncc_window_size_um must be positive.")
+    min_local_std = float(block.get("min_local_std_fraction", 0.005))
+    if not 0 <= min_local_std < 1:
+        raise ValueError(f"{location}.min_local_std_fraction must satisfy 0 <= value < 1.")
     radius = float(block.get("cell_sampling_radius_um", 2.6))
     if radius < 0:
         raise ValueError(f"{location}.cell_sampling_radius_um must be non-negative.")
-    win_size = int(block.get("ssim_window_size", 11))
-    if win_size < 3 or win_size % 2 == 0:
-        raise ValueError(f"{location}.ssim_window_size must be an odd integer >= 3.")
-    chunks = block.get("dense_chunks", [512, 512])
+    chunks = block.get("dense_chunks", [1024, 1024])
     if (
         not isinstance(chunks, (list, tuple))
         or len(chunks) != 2
         or any(int(value) <= 0 for value in chunks)
     ):
         raise ValueError(f"{location}.dense_chunks must contain two positive integers.")
-    flow = block.get("optical_flow") or {}
-    if not isinstance(flow, dict):
-        raise ValueError(f"{location}.optical_flow must be a mapping.")
-    if str(flow.get("method", "farneback")).strip().lower() != "farneback":
-        raise ValueError(f"{location}.optical_flow.method currently supports only 'farneback'.")
 
 
 def _deep_merge(base: Any, override: Any) -> Any:

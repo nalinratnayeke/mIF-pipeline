@@ -13,7 +13,7 @@ The current processing sequence is:
 5. SpatialData assembly, aggregation, and optional vectorization
 6. lightweight QC
 
-An optional optical-flow alignment-QC operation can be applied after this completed sequence. It
+An optional ZNCC alignment-QC operation can be applied after this completed sequence. It
 is an additive post-processing command rather than a default pipeline stage. The implementation
 treats outputs produced by the sequence above as authoritative and does not rerun or rewrite any
 preceding stage.
@@ -289,23 +289,24 @@ next to the generated outputs. When a slide is resumed from a later stage, the o
 still show which config, channel map, stage list, and runtime context produced the existing upstream
 artifacts.
 
-### Optional optical-flow alignment QC
+### Optional ZNCC alignment QC
 
 For longitudinal DAPI alignment assessment, an explicit ordered alias list selects channels from
 the existing canonical `full_image`; alias text is not parsed and the channel map is not migrated.
-Every moving channel is compared directly with the configured reference using dense Farnebäck
-flow at a selected existing pyramid level. Images are independently percentile-normalized for flow
-and residual calculations. The moving image is warped into reference coordinates, after which the
-pipeline records signed physical displacement, displacement magnitude, absolute intensity
-residual, and local structural dissimilarity. A separate local raw-intensity ratio retains evidence
-of DAPI support that independent normalization could obscure.
+Every comparison channel is evaluated directly against the configured reference using dense,
+pre-alignment local zero-normalized cross-correlation (ZNCC) at a selected existing pyramid level.
+An unclipped robust affine scale improves numerical stability without changing correlation.
+The physical ZNCC window is converted independently to odd x/y pixel dimensions using the
+selected level's actual resolution. Correlation is retained in `[-1, 1]`, and the reported residual
+is `1 - clip(correlation, 0, 1)`. No image correction or cell filtering is performed.
 
-Cell centers from the existing `agg_cell_labels` table are projected onto the flow grid. Dense
+Cell centers from the existing `agg_cell_labels` table are projected onto the ZNCC grid. Dense
 fields are summarized with a nanmedian over a physical-radius neighborhood, so the pixel window
 adapts to the selected level's actual x/y resolution. Dense maps and cell-by-channel checkpoints
 are stored in a compressed slide-local Zarr artifact, while an additive `alignment_qc` AnnData
-table is written into the canonical SpatialData store. The nonlinear flow is not represented as an
-affine SpatialData transformation.
+table is written into the canonical SpatialData store. Locally uniform neighborhoods and the
+explicit half-window image border are undefined and stored as `NaN`; no dark-intensity mask is
+used.
 
 Compatibility with already-processed slides is an explicit constraint: `run_all()`, default shell
 stage lists, channel-map schemas, upstream artifacts, existing SpatialData elements, and stored

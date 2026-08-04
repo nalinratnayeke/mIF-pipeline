@@ -130,15 +130,9 @@ def qc_slide(config: Union[dict[str, Any], str, Path], slide_id: str) -> dict[st
         add_check("alignment_qc_zarr_exists", paths["zarr_path"].exists(), str(paths["zarr_path"]))
         add_check("alignment_qc_summary_exists", paths["summary_path"].exists(), str(paths["summary_path"]))
         if alignment_qc_block.get("save_dense_maps", True):
-            dense_metric_names = (
-                "flow_x_um",
-                "flow_y_um",
-                "displacement_um",
-                "absolute_residual",
-                "structural_residual",
-            )
+            dense_metric_names = ("zncc_correlation", "zncc_residual")
             expected_dense_paths = [
-                paths["zarr_path"] / "dense" / f"round_{index:03d}" / metric
+                paths["zarr_path"] / "dense" / f"channel_{index:03d}" / metric
                 for index, _alias in enumerate(alignment_qc_block.get("channels", []))
                 for metric in dense_metric_names
             ]
@@ -161,7 +155,8 @@ def qc_slide(config: Union[dict[str, Any], str, Path], slide_id: str) -> dict[st
                 table_expected = bool(alignment_qc_block.get("write_spatialdata_table", True))
                 table_ok = not table_expected or bool(manifest.get("spatialdata_table_written", False))
                 manifest_ok = (
-                    bool(manifest.get("complete", False))
+                    manifest.get("schema_version") == 1
+                    and bool(manifest.get("complete", False))
                     and completed == expected_indices
                     and list((manifest.get("settings") or {}).get("channels", [])) == expected_channels
                     and table_ok

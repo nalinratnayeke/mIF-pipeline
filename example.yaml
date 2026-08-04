@@ -89,20 +89,11 @@ alignment_qc:
   channels: []
   target_resolution_um: 2.6
   pyramid_level: null
-  lower_percentile: 1.0
-  upper_percentile: 99.9
-  optical_flow:
-    method: farneback
-    pyr_scale: 0.5
-    levels: 3
-    winsize: 21
-    iterations: 3
-    poly_n: 7
-    poly_sigma: 1.5
-    flags: 0
-  ssim_window_size: 11
+  zncc_window_size_um: 75.0
+  scaling_percentiles: [1.0, 99.9]
+  min_local_std_fraction: 0.005
   cell_sampling_radius_um: 2.6
-  dense_chunks: [512, 512]
+  dense_chunks: [1024, 1024]
   save_dense_maps: true
   write_spatialdata_table: true
 

@@ -110,6 +110,8 @@ Important config rules:
 - keep run-record provenance as slide-local CLI sidecars under `run_records/` by default; do not add it as a separate stage
 - keep `alignment_qc` optional and explicit-only; configs without the block must retain their current resolved behavior
 - keep alignment channel selection alias-only and ordered by `alignment_qc.channels`; do not migrate channel maps or infer AF/imaging metadata
+- keep alignment QC ZNCC-only and pre-alignment; do not add warping, displacement, thresholds, or cell filtering without an explicit design change
+- treat the ZNCC configuration and schema as the first alignment-QC format; do not add compatibility handling for discarded prototypes
 
 The `setup` block may also define post-generation refinement rules:
 

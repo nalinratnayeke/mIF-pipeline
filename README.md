@@ -33,8 +33,7 @@ Active debugging notebooks live under [prototyping](/home/ratnayn/codex/mIF-pipe
 - [mif_pipeline_instanseg_nimbus_api_v1-Crop.ipynb](/home/ratnayn/codex/mIF-pipeline/prototyping/mif_pipeline_instanseg_nimbus_api_v1-Crop.ipynb)
 - [mif_pipeline_instanseg_nimbus_api_v1-fullslide.ipynb](/home/ratnayn/codex/mIF-pipeline/prototyping/mif_pipeline_instanseg_nimbus_api_v1-fullslide.ipynb)
 - [mif_pipeline_harpy_spatialdata_api_v1-Crop.ipynb](/home/ratnayn/codex/mIF-pipeline/prototyping/mif_pipeline_harpy_spatialdata_api_v1-Crop.ipynb)
-- [alignment_qc_two_round_validation.ipynb](prototyping/alignment_qc_two_round_validation.ipynb)
-- [alignment_qc_zncc_validation_v2.ipynb](prototyping/alignment_qc_zncc_validation_v2.ipynb)
+- [alignment_qc_zncc_validation.ipynb](prototyping/alignment_qc_zncc_validation.ipynb)
 
 Reference implementations and external snapshots live under [Reference](/home/ratnayn/codex/mIF-pipeline/Reference).
 
@@ -177,6 +176,9 @@ alignment_qc:
   reference_channel: R1_DAPI
   channels: [R1_DAPI, R2_DAPI, R3_DAPI]
   target_resolution_um: 2.6
+  zncc_window_size_um: 75.0
+  scaling_percentiles: [1.0, 99.9]
+  min_local_std_fraction: 0.005
 ```
 
 ```bash
@@ -187,11 +189,16 @@ bash scripts/run_pipeline.sh \
 ```
 
 The stage does not interpret alias text: AF versus imaging selection is entirely determined by the
-aliases listed by the user. It reads `full_image` and `agg_cell_labels`, writes dense and cell-level
-artifacts under the slide-local `alignment_qc/` directory, and appends only the `alignment_qc`
-AnnData table to the existing SpatialData store. Upstream images, labels, tables, shapes, and
-transformations are not rewritten. Install OpenCV in the SpatialData environment with
-`pip install -e '.[alignment-qc]'`.
+aliases listed by the user. It calculates dense pre-alignment local ZNCC without correcting the
+images, then stores continuous `zncc_correlation` and `zncc_residual` values densely and around
+the detected cell centers. Low-information neighborhoods and the explicit ZNCC border are `NaN`;
+no intensity mask, pass/fail threshold, or cell exclusion is applied.
+
+Artifacts are written under the slide-local `alignment_qc/` directory, and only the additive
+`alignment_qc` AnnData table is written to the existing SpatialData store. Upstream images,
+labels, tables, shapes, and transformations are not rewritten. Install OpenCV in the SpatialData
+environment with `pip install -e '.[alignment-qc]'`. The read-only validation notebook uses the
+same production helpers and supports whole-slide and micron-coordinate zoom inspection.
 
 ## SpatialData
 

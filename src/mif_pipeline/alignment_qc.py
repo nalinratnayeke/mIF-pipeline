@@ -12,24 +12,8 @@ from typing import Any, Iterable, Mapping, Union
 from .config import ensure_config, get_slide_config, resolve_channel_entries
 
 
-METRIC_NAMES = (
-    "flow_x_um",
-    "flow_y_um",
-    "displacement_um",
-    "absolute_residual",
-    "structural_residual",
-    "dapi_support",
-)
-DENSE_METRIC_NAMES = METRIC_NAMES[:-1]
-DEFAULT_FLOW_PARAMS = {
-    "pyr_scale": 0.5,
-    "levels": 3,
-    "winsize": 21,
-    "iterations": 3,
-    "poly_n": 7,
-    "poly_sigma": 1.5,
-    "flags": 0,
-}
+METRIC_NAMES = ("zncc_correlation", "zncc_residual")
+DENSE_METRIC_NAMES = METRIC_NAMES
 ALIGNMENT_QC_SCHEMA_VERSION = 1
 
 
@@ -50,14 +34,6 @@ def _import_cv2():
             "in the SpatialData environment."
         ) from exc
     return cv2
-
-
-def _import_structural_similarity():
-    try:
-        from skimage.metrics import structural_similarity
-    except ImportError as exc:
-        raise ImportError("Alignment QC requires 'scikit-image'.") from exc
-    return structural_similarity
 
 
 def _import_spatialdata():
@@ -118,16 +94,14 @@ def _alignment_paths(slide: Mapping[str, Any]) -> dict[str, Path]:
     return {
         "output_dir": root,
         "zarr_path": root / "alignment_qc.zarr",
-        "summary_path": root / "round_summary.csv",
+        "summary_path": root / "channel_summary.csv",
         "manifest_path": root / "manifest.json",
         "spatialdata_store": Path(store_path),
     }
 
 
 def _resolved_settings(block: Mapping[str, Any]) -> dict[str, Any]:
-    flow = dict(DEFAULT_FLOW_PARAMS)
-    configured_flow = block.get("optical_flow") or {}
-    flow.update({key: configured_flow[key] for key in DEFAULT_FLOW_PARAMS if key in configured_flow})
+    percentiles = block.get("scaling_percentiles", [1.0, 99.9])
     return {
         "reference_channel": str(block["reference_channel"]),
         "channels": [str(alias) for alias in block["channels"]],
@@ -139,12 +113,11 @@ def _resolved_settings(block: Mapping[str, Any]) -> dict[str, Any]:
         "pyramid_level": (
             None if block.get("pyramid_level") is None else int(block["pyramid_level"])
         ),
-        "lower_percentile": float(block.get("lower_percentile", 1.0)),
-        "upper_percentile": float(block.get("upper_percentile", 99.9)),
-        "optical_flow": {"method": "farneback", **flow},
-        "ssim_window_size": int(block.get("ssim_window_size", 11)),
+        "zncc_window_size_um": float(block.get("zncc_window_size_um", 75.0)),
+        "scaling_percentiles": [float(percentiles[0]), float(percentiles[1])],
+        "min_local_std_fraction": float(block.get("min_local_std_fraction", 0.005)),
         "cell_sampling_radius_um": float(block.get("cell_sampling_radius_um", 2.6)),
-        "dense_chunks": [int(value) for value in block.get("dense_chunks", [512, 512])],
+        "dense_chunks": [int(value) for value in block.get("dense_chunks", [1024, 1024])],
         "save_dense_maps": bool(block.get("save_dense_maps", True)),
         "write_spatialdata_table": bool(block.get("write_spatialdata_table", True)),
     }
@@ -177,11 +150,12 @@ def _write_json_atomic(path: Path, payload: Mapping[str, Any]) -> None:
 def _load_manifest(path: Path) -> dict[str, Any] | None:
     if not path.exists():
         return None
-    with path.open("r", encoding="utf-8") as handle:
-        payload = json.load(handle)
-    if not isinstance(payload, dict):
-        raise ValueError(f"Alignment-QC manifest must contain an object: {path}")
-    return payload
+    try:
+        with path.open("r", encoding="utf-8") as handle:
+            payload = json.load(handle)
+    except Exception:
+        return None
+    return payload if isinstance(payload, dict) else None
 
 
 def _write_summary_csv(path: Path, summaries: Iterable[Mapping[str, Any]]) -> None:
@@ -206,120 +180,164 @@ def _safe_remove_output(path: Path, *, slide_output_dir: Path) -> None:
     slide_root = slide_output_dir.resolve()
     if resolved == slide_root or resolved == resolved.parent or slide_root not in resolved.parents:
         raise ValueError(
-            f"Refusing to remove unsafe alignment_qc.output_dir {resolved}; it must be a child of {slide_root}."
+            f"Refusing to remove unsafe alignment_qc.output_dir {resolved}; "
+            f"it must be a child of {slide_root}."
         )
     if resolved.exists():
         shutil.rmtree(resolved)
 
 
-def normalize_percentile_image(
+def affine_scale_image(
     image: Any,
     *,
-    lower_percentile: float = 1.0,
-    upper_percentile: float = 99.9,
+    scaling_percentiles: tuple[float, float] | list[float] = (1.0, 99.9),
 ) -> tuple[Any, dict[str, float]]:
-    """Independently percentile-normalize one image for flow and residual calculations."""
+    """Apply an unclipped positive affine scale for stable ZNCC arithmetic."""
     np = _import_numpy()
     array = np.asarray(image, dtype=np.float32)
+    if array.ndim != 2:
+        raise ValueError(f"Expected a two-dimensional image, found shape {array.shape}.")
     finite = np.isfinite(array)
-    if not finite.any():
-        raise ValueError("Cannot normalize an image with no finite pixels.")
-    finite_values = array[finite]
-    low = float(np.percentile(finite_values, lower_percentile))
-    high = float(np.percentile(finite_values, upper_percentile))
+    if not finite.all():
+        count = int(array.size - np.count_nonzero(finite))
+        raise ValueError(f"Alignment-QC images must be finite; found {count} nonfinite pixels.")
+    lower, upper = (float(value) for value in scaling_percentiles)
+    low = float(np.percentile(array, lower))
+    high = float(np.percentile(array, upper))
     dynamic_range = high - low
     if not math.isfinite(dynamic_range) or dynamic_range <= 0:
-        normalized = np.zeros_like(array, dtype=np.float32)
+        scaled = np.zeros_like(array, dtype=np.float32)
+        dynamic_range = 0.0
     else:
-        normalized = np.clip((array - low) / dynamic_range, 0.0, 1.0).astype(np.float32)
-    normalized[~finite] = 0.0
-    return normalized, {
-        "normalization_low": low,
-        "normalization_high": high,
-        "normalization_dynamic_range": float(max(dynamic_range, 0.0)),
-        "fraction_at_or_below_low": float(np.mean(finite_values <= low)),
-        "fraction_at_or_above_high": float(np.mean(finite_values >= high)),
+        scaled = ((array - low) / dynamic_range).astype(np.float32)
+    return scaled, {
+        "scaling_lower_percentile": lower,
+        "scaling_upper_percentile": upper,
+        "scaling_low": low,
+        "scaling_high": high,
+        "scaling_dynamic_range": float(dynamic_range),
     }
 
 
-def compute_flow_residual_maps(
-    reference_normalized: Any,
-    moving_normalized: Any,
+def physical_odd_window_size(size_um: float, pixel_size_um: float) -> int:
+    """Convert a physical full-window width to an odd pixel width."""
+    if size_um <= 0 or pixel_size_um <= 0:
+        raise ValueError("ZNCC window size and pixel size must be positive.")
+    radius = max(1, int(math.ceil((float(size_um) / 2.0) / float(pixel_size_um))))
+    return 2 * radius + 1
+
+
+def zncc_window_shape(
+    size_um: float,
     *,
     pixel_size_x_um: float,
     pixel_size_y_um: float,
-    flow_params: Mapping[str, Any] | None = None,
-    ssim_window_size: int = 11,
+) -> tuple[int, int]:
+    """Return the ZNCC window as (y, x) odd pixel dimensions."""
+    return (
+        physical_odd_window_size(size_um, pixel_size_y_um),
+        physical_odd_window_size(size_um, pixel_size_x_um),
+    )
+
+
+def dense_local_zncc(
+    reference: Any,
+    comparison: Any,
+    *,
+    window_shape: tuple[int, int],
+    minimum_local_std_fraction: float = 0.005,
+    chunk_shape: tuple[int, int] = (1024, 1024),
 ) -> dict[str, Any]:
-    """Compute reference-to-moving Farnebäck flow, warp, and spatial residual maps."""
+    """Calculate pre-alignment local Pearson correlation with exact chunk halos."""
     np = _import_numpy()
     cv2 = _import_cv2()
-    structural_similarity = _import_structural_similarity()
-    reference = np.asarray(reference_normalized, dtype=np.float32)
-    moving = np.asarray(moving_normalized, dtype=np.float32)
-    if reference.ndim != 2 or moving.ndim != 2 or reference.shape != moving.shape:
+    ref = np.asarray(reference, dtype=np.float32)
+    moving = np.asarray(comparison, dtype=np.float32)
+    if ref.ndim != 2 or ref.shape != moving.shape:
         raise ValueError(
-            f"Reference and moving images must be matching 2D arrays; got {reference.shape} and {moving.shape}."
+            f"ZNCC inputs must be matching two-dimensional arrays; got {ref.shape} and {moving.shape}."
         )
-    if min(reference.shape) < ssim_window_size:
+    if not np.isfinite(ref).all() or not np.isfinite(moving).all():
+        raise ValueError("ZNCC inputs must contain only finite pixels.")
+    window_y, window_x = (int(value) for value in window_shape)
+    if window_y < 3 or window_x < 3 or window_y % 2 == 0 or window_x % 2 == 0:
+        raise ValueError("ZNCC window dimensions must be odd integers >= 3.")
+    height, width = ref.shape
+    if window_y > height or window_x > width:
         raise ValueError(
-            f"ssim_window_size={ssim_window_size} exceeds the selected image dimensions {reference.shape}."
+            f"ZNCC window {(window_y, window_x)} exceeds image dimensions {(height, width)}."
+        )
+    chunk_y, chunk_x = (int(value) for value in chunk_shape)
+    if chunk_y <= 0 or chunk_x <= 0:
+        raise ValueError("ZNCC chunk dimensions must be positive.")
+    if minimum_local_std_fraction < 0:
+        raise ValueError("minimum_local_std_fraction must be non-negative.")
+
+    radius_y, radius_x = window_y // 2, window_x // 2
+    window_area = float(window_y * window_x)
+    correlation = np.full(ref.shape, np.nan, dtype=np.float32)
+
+    def box_sum(values: Any) -> Any:
+        return cv2.boxFilter(
+            values,
+            ddepth=cv2.CV_64F,
+            ksize=(window_x, window_y),
+            normalize=False,
+            borderType=cv2.BORDER_CONSTANT,
         )
 
-    params = dict(DEFAULT_FLOW_PARAMS)
-    if flow_params:
-        params.update({key: flow_params[key] for key in DEFAULT_FLOW_PARAMS if key in flow_params})
-    reference_u8 = np.rint(np.clip(reference, 0, 1) * 255).astype(np.uint8)
-    moving_u8 = np.rint(np.clip(moving, 0, 1) * 255).astype(np.uint8)
-    flow = cv2.calcOpticalFlowFarneback(reference_u8, moving_u8, None, **params)
-    flow = np.asarray(flow, dtype=np.float32)
+    for y0 in range(0, height, chunk_y):
+        y1 = min(y0 + chunk_y, height)
+        ey0, ey1 = max(0, y0 - radius_y), min(height, y1 + radius_y)
+        for x0 in range(0, width, chunk_x):
+            x1 = min(x0 + chunk_x, width)
+            ex0, ex1 = max(0, x0 - radius_x), min(width, x1 + radius_x)
+            local_ref = ref[ey0:ey1, ex0:ex1].astype(np.float64)
+            local_moving = moving[ey0:ey1, ex0:ex1].astype(np.float64)
 
-    height, width = reference.shape
-    grid_x, grid_y = np.meshgrid(
-        np.arange(width, dtype=np.float32),
-        np.arange(height, dtype=np.float32),
-    )
-    map_x = grid_x + flow[..., 0]
-    map_y = grid_y + flow[..., 1]
-    valid = (map_x >= 0) & (map_x <= width - 1) & (map_y >= 0) & (map_y <= height - 1)
-    warped = cv2.remap(
-        moving,
-        map_x,
-        map_y,
-        interpolation=cv2.INTER_LINEAR,
-        borderMode=cv2.BORDER_CONSTANT,
-        borderValue=0,
-    ).astype(np.float32)
-    _, ssim_map = structural_similarity(
-        reference,
-        warped,
-        data_range=1.0,
-        win_size=int(ssim_window_size),
-        full=True,
-    )
-    # Exclude borders whose SSIM neighborhood includes an invalid warp location.
-    kernel = np.ones((ssim_window_size, ssim_window_size), dtype=np.uint8)
-    residual_valid = cv2.erode(valid.astype(np.uint8), kernel, iterations=1).astype(bool)
+            sum_ref = box_sum(local_ref)
+            sum_moving = box_sum(local_moving)
+            sum_ref2 = box_sum(local_ref * local_ref)
+            sum_moving2 = box_sum(local_moving * local_moving)
+            sum_product = box_sum(local_ref * local_moving)
 
-    flow_x_um = flow[..., 0] * float(pixel_size_x_um)
-    flow_y_um = flow[..., 1] * float(pixel_size_y_um)
-    displacement_um = np.sqrt(flow_x_um**2 + flow_y_um**2)
-    absolute_residual = np.abs(reference - warped)
-    structural_residual = 1.0 - np.asarray(ssim_map, dtype=np.float32)
-    maps = {
-        "flow_x_um": flow_x_um.astype(np.float32),
-        "flow_y_um": flow_y_um.astype(np.float32),
-        "displacement_um": displacement_um.astype(np.float32),
-        "absolute_residual": absolute_residual.astype(np.float32),
-        "structural_residual": structural_residual.astype(np.float32),
-    }
-    for value in maps.values():
-        value[~residual_valid] = np.nan
+            covariance = sum_product - (sum_ref * sum_moving / window_area)
+            variance_ref = np.maximum(sum_ref2 - sum_ref * sum_ref / window_area, 0.0)
+            variance_moving = np.maximum(
+                sum_moving2 - sum_moving * sum_moving / window_area,
+                0.0,
+            )
+            std_ref = np.sqrt(variance_ref / window_area)
+            std_moving = np.sqrt(variance_moving / window_area)
+            denominator = np.sqrt(variance_ref * variance_moving)
+            valid = (
+                (std_ref >= float(minimum_local_std_fraction))
+                & (std_moving >= float(minimum_local_std_fraction))
+                & (denominator > 0)
+            )
+            local_correlation = np.full(local_ref.shape, np.nan, dtype=np.float64)
+            local_correlation[valid] = covariance[valid] / denominator[valid]
+
+            core_y = slice(y0 - ey0, y1 - ey0)
+            core_x = slice(x0 - ex0, x1 - ex0)
+            core = local_correlation[core_y, core_x]
+            global_y = np.arange(y0, y1)[:, None]
+            global_x = np.arange(x0, x1)[None, :]
+            interior = (
+                (global_y >= radius_y)
+                & (global_y < height - radius_y)
+                & (global_x >= radius_x)
+                & (global_x < width - radius_x)
+            )
+            core = np.where(interior, np.clip(core, -1.0, 1.0), np.nan)
+            correlation[y0:y1, x0:x1] = core.astype(np.float32)
+
+    residual = (1.0 - np.clip(correlation, 0.0, 1.0)).astype(np.float32)
+    residual[~np.isfinite(correlation)] = np.nan
     return {
-        **maps,
-        "warped_moving": warped,
-        "valid_mask": residual_valid,
-        "flow_direction": "reference_to_moving",
+        "zncc_correlation": correlation,
+        "zncc_residual": residual,
+        "valid_mask": np.isfinite(correlation),
     }
 
 
@@ -329,11 +347,11 @@ def neighborhood_radii_pixels(
     pixel_size_x_um: float,
     pixel_size_y_um: float,
 ) -> tuple[int, int]:
-    """Return integer x/y radii on the optical-flow grid for a physical radius."""
+    """Return ceil-rounded x/y radii on the selected ZNCC grid."""
     if radius_um < 0 or pixel_size_x_um <= 0 or pixel_size_y_um <= 0:
         raise ValueError("Sampling radius must be non-negative and pixel sizes must be positive.")
-    radius_x = int(round(float(radius_um) / float(pixel_size_x_um)))
-    radius_y = int(round(float(radius_um) / float(pixel_size_y_um)))
+    radius_x = int(math.ceil(float(radius_um) / float(pixel_size_x_um)))
+    radius_y = int(math.ceil(float(radius_um) / float(pixel_size_y_um)))
     return max(0, radius_x), max(0, radius_y)
 
 
@@ -346,7 +364,7 @@ def sample_neighborhood_nanmedian(
     radius_y: int,
     batch_size: int = 100_000,
 ) -> Any:
-    """Sample local nanmedians efficiently without materializing a full filtered image."""
+    """Sample local nanmedians without materializing a full median-filtered image."""
     np = _import_numpy()
     array = np.asarray(image, dtype=np.float32)
     if array.ndim != 2:
@@ -363,9 +381,7 @@ def sample_neighborhood_nanmedian(
     xi = np.rint(x[indices]).astype(int)
     yi = np.rint(y[indices]).astype(int)
     inside = (xi >= 0) & (xi < array.shape[1]) & (yi >= 0) & (yi < array.shape[0])
-    indices = indices[inside]
-    xi = xi[inside]
-    yi = yi[inside]
+    indices, xi, yi = indices[inside], xi[inside], yi[inside]
     if not len(indices):
         return result
 
@@ -389,39 +405,6 @@ def sample_neighborhood_nanmedian(
             values = np.nanmedian(selected, axis=(-2, -1)).astype(np.float32)
         result[indices[start:stop]] = values
     return result
-
-
-def local_dapi_support(
-    reference_raw: Any,
-    moving_raw: Any,
-    x_coordinates: Any,
-    y_coordinates: Any,
-    *,
-    radius_x: int,
-    radius_y: int,
-    reference_dynamic_range: float,
-) -> Any:
-    """Return the unnormalized moving/reference local intensity ratio."""
-    np = _import_numpy()
-    reference_values = sample_neighborhood_nanmedian(
-        reference_raw,
-        x_coordinates,
-        y_coordinates,
-        radius_x=radius_x,
-        radius_y=radius_y,
-    )
-    moving_values = sample_neighborhood_nanmedian(
-        moving_raw,
-        x_coordinates,
-        y_coordinates,
-        radius_x=radius_x,
-        radius_y=radius_y,
-    )
-    epsilon = max(abs(float(reference_dynamic_range)) * 1e-6, float(np.finfo(np.float32).eps))
-    support = np.full(reference_values.shape, np.nan, dtype=np.float32)
-    valid = np.isfinite(reference_values) & np.isfinite(moving_values) & (np.abs(reference_values) > epsilon)
-    support[valid] = moving_values[valid] / reference_values[valid]
-    return support
 
 
 def _node_data_array(node: Any) -> Any:
@@ -482,31 +465,36 @@ def select_pyramid_level(
     pyramid_level: int | None,
     target_resolution_um: float | None,
 ) -> dict[str, Any]:
-    """Select a level and report its exact x/y physical resolution."""
+    """Select a pyramid level and report its exact x/y physical resolution."""
     base_y, base_x = _level_shape(levels[0][1])
     candidates = []
     for index, (name, array) in enumerate(levels):
         height, width = _level_shape(array)
-        pixel_x = float(native_pixel_size_um) * base_x / width
-        pixel_y = float(native_pixel_size_um) * base_y / height
         candidates.append(
             {
                 "index": index,
                 "name": name,
                 "array": array,
                 "shape": [height, width],
-                "pixel_size_x_um": pixel_x,
-                "pixel_size_y_um": pixel_y,
+                "pixel_size_x_um": float(native_pixel_size_um) * base_x / width,
+                "pixel_size_y_um": float(native_pixel_size_um) * base_y / height,
             }
         )
     if pyramid_level is not None:
         if pyramid_level < 0 or pyramid_level >= len(candidates):
-            raise IndexError(f"pyramid_level {pyramid_level} is outside the available range 0..{len(candidates)-1}.")
+            raise IndexError(
+                f"pyramid_level {pyramid_level} is outside the available range "
+                f"0..{len(candidates) - 1}."
+            )
         return candidates[pyramid_level]
     target = float(2.6 if target_resolution_um is None else target_resolution_um)
     return min(
         candidates,
-        key=lambda item: abs(math.log(math.sqrt(item["pixel_size_x_um"] * item["pixel_size_y_um"]) / target)),
+        key=lambda item: abs(
+            math.log(
+                math.sqrt(item["pixel_size_x_um"] * item["pixel_size_y_um"]) / target
+            )
+        ),
     )
 
 
@@ -520,8 +508,7 @@ def _materialize_channel(level_array: Any, alias: str) -> Any:
     compute = getattr(data, "compute", None)
     if callable(compute):
         data = compute()
-    array = np.asarray(data)
-    array = np.squeeze(array)
+    array = np.squeeze(np.asarray(data))
     if array.ndim != 2:
         raise ValueError(f"Selected channel {alias!r} did not resolve to a 2D array: {array.shape}.")
     return array.astype(np.float32, copy=False)
@@ -542,7 +529,8 @@ def _cell_observations(source_table: Any) -> tuple[Any, Any, Any]:
     spatial = np.asarray(source_table.obsm["spatial"], dtype=float)
     if spatial.shape != (len(obs.index), 2):
         raise ValueError(
-            f"agg_cell_labels.obsm['spatial'] must have shape ({len(obs.index)}, 2); found {spatial.shape}."
+            f"agg_cell_labels.obsm['spatial'] must have shape ({len(obs.index)}, 2); "
+            f"found {spatial.shape}."
         )
     obs["instance_id"] = instance_ids.to_numpy()
     obs["region"] = "cell_labels"
@@ -568,13 +556,16 @@ def _replace_zarr_array(group: Any, name: str, data: Any, *, chunks: tuple[int, 
     array = np.asarray(data)
     if name in group:
         del group[name]
-    create_array = getattr(group, "create_array", None)
     kwargs = {
         "data": array,
-        "chunks": tuple(max(1, min(int(chunk), int(size))) for chunk, size in zip(chunks, array.shape)),
+        "chunks": tuple(
+            max(1, min(int(chunk), max(int(size), 1)))
+            for chunk, size in zip(chunks, array.shape)
+        ),
         "compressor": _zarr_compressor(),
         "overwrite": True,
     }
+    create_array = getattr(group, "create_array", None)
     if callable(create_array):
         create_array(name, **kwargs)
     else:
@@ -601,6 +592,10 @@ def _require_metric_arrays(root: Any, *, cell_count: int, channel_count: int) ->
     return metrics
 
 
+def _artifact_error() -> ValueError:
+    return ValueError("Existing alignment-QC output is not valid for this run; rerun with force=True.")
+
+
 def _initialize_or_validate_artifact(
     zarr_path: Path,
     *,
@@ -613,26 +608,42 @@ def _initialize_or_validate_artifact(
     root = _zarr_open_group(zarr_path, "a")
     aliases = list(settings["channels"])
     expected_hash = _settings_hash(settings)
-    existing_hash = root.attrs.get("settings_hash")
-    if existing_hash is not None and str(existing_hash) != expected_hash:
-        raise ValueError("Existing alignment_qc.zarr uses incompatible settings; rerun with force=True.")
+    if list(root.attrs.keys()):
+        if (
+            int(root.attrs.get("schema_version", -1)) != ALIGNMENT_QC_SCHEMA_VERSION
+            or str(root.attrs.get("settings_hash", "")) != expected_hash
+            or list(root.attrs.get("channels", [])) != aliases
+        ):
+            raise _artifact_error()
     root.attrs.update(
         {
             "schema_version": ALIGNMENT_QC_SCHEMA_VERSION,
             "settings_hash": expected_hash,
             "channels": aliases,
             "reference_channel": settings["reference_channel"],
-            "flow_direction": "reference_to_moving",
         }
     )
-    encoded_width = max(1, max((len(str(value).encode("utf-8")) for value in instance_ids), default=1))
-    encoded_ids = np.asarray([str(value).encode("utf-8") for value in instance_ids], dtype=f"S{encoded_width}")
+    encoded_width = max(
+        1,
+        max((len(str(value).encode("utf-8")) for value in instance_ids), default=1),
+    )
+    encoded_ids = np.asarray(
+        [str(value).encode("utf-8") for value in instance_ids],
+        dtype=f"S{encoded_width}",
+    )
     if "instance_id" in root:
         existing = root["instance_id"][:]
-        if existing.shape != encoded_ids.shape or not np.array_equal(existing.astype(str), encoded_ids.astype(str)):
-            raise ValueError("Existing alignment-QC artifact has different cell identifiers; rerun with force=True.")
+        if existing.shape != encoded_ids.shape or not np.array_equal(
+            existing.astype(str), encoded_ids.astype(str)
+        ):
+            raise _artifact_error()
     else:
-        _replace_zarr_array(root, "instance_id", encoded_ids, chunks=(min(max(len(encoded_ids), 1), 4096),))
+        _replace_zarr_array(
+            root,
+            "instance_id",
+            encoded_ids,
+            chunks=(min(max(len(encoded_ids), 1), 4096),),
+        )
         _replace_zarr_array(
             root,
             "spatial_um",
@@ -640,20 +651,16 @@ def _initialize_or_validate_artifact(
             chunks=(min(max(len(encoded_ids), 1), 4096), 2),
         )
     completed_indices = list(completed_indices)
-    if completed_indices:
-        if "cell_metrics" not in root:
-            raise ValueError("Alignment-QC manifest has completed channels but cell_metrics are missing; use force=True.")
-        missing_metrics = [name for name in METRIC_NAMES if name not in root["cell_metrics"]]
-        if missing_metrics:
-            raise ValueError(
-                f"Alignment-QC manifest has completed channels but metrics are missing {missing_metrics}; "
-                "use force=True."
-            )
+    if completed_indices and (
+        "cell_metrics" not in root
+        or any(name not in root["cell_metrics"] for name in METRIC_NAMES)
+    ):
+        raise _artifact_error()
     metrics = _require_metric_arrays(root, cell_count=len(instance_ids), channel_count=len(aliases))
     return root, metrics
 
 
-def _write_dense_round(
+def _write_dense_channel(
     root: Any,
     *,
     index: int,
@@ -663,7 +670,7 @@ def _write_dense_round(
     is_reference: bool,
 ) -> None:
     dense = root.require_group("dense")
-    group_name = f"round_{index:03d}"
+    group_name = f"channel_{index:03d}"
     if group_name in dense:
         del dense[group_name]
     group = dense.create_group(group_name)
@@ -685,36 +692,30 @@ def _finite_percentile(array: Any, percentile: float) -> float | None:
     return None if not len(values) else float(np.percentile(values, percentile))
 
 
-def _round_summary(
+def _channel_summary(
     *,
     alias: str,
     index: int,
     is_reference: bool,
-    normalization: Mapping[str, float],
+    scaling: Mapping[str, float],
     maps: Mapping[str, Any],
-    support: Any,
+    cell_values: Mapping[str, Any],
 ) -> dict[str, Any]:
     np = _import_numpy()
-    structural = np.asarray(maps["structural_residual"], dtype=float)
-    valid = np.isfinite(structural)
+    correlation = np.asarray(maps["zncc_correlation"], dtype=float)
+    valid_dense = np.isfinite(correlation)
+    cell_correlation = np.asarray(cell_values["zncc_correlation"], dtype=float)
     return {
         "channel_alias": alias,
         "acquisition_order": int(index),
         "is_reference": bool(is_reference),
-        **dict(normalization),
-        "valid_dense_fraction": float(np.mean(valid)),
-        "median_structural_similarity": (
-            None if not valid.any() else float(np.median(1.0 - structural[valid]))
-        ),
-        "median_displacement_um": _finite_percentile(maps["displacement_um"], 50),
-        "p95_displacement_um": _finite_percentile(maps["displacement_um"], 95),
-        "median_absolute_residual": _finite_percentile(maps["absolute_residual"], 50),
-        "p95_absolute_residual": _finite_percentile(maps["absolute_residual"], 95),
-        "median_structural_residual": _finite_percentile(structural, 50),
-        "p95_structural_residual": _finite_percentile(structural, 95),
-        "p05_dapi_support": _finite_percentile(support, 5),
-        "median_dapi_support": _finite_percentile(support, 50),
-        "p95_dapi_support": _finite_percentile(support, 95),
+        **dict(scaling),
+        "valid_dense_fraction": float(np.mean(valid_dense)),
+        "valid_cell_fraction": float(np.mean(np.isfinite(cell_correlation))),
+        "p05_zncc_correlation": _finite_percentile(correlation, 5),
+        "median_zncc_correlation": _finite_percentile(correlation, 50),
+        "median_zncc_residual": _finite_percentile(maps["zncc_residual"], 50),
+        "p95_zncc_residual": _finite_percentile(maps["zncc_residual"], 95),
     }
 
 
@@ -726,6 +727,7 @@ def _build_alignment_table(
     metric_arrays: Mapping[str, Any],
     summaries: list[Mapping[str, Any]],
     artifact_path: Path,
+    window: Mapping[str, Any],
     TableModel: Any,
     ad: Any,
 ) -> Any:
@@ -741,19 +743,19 @@ def _build_alignment_table(
         },
         index=pd.Index(aliases, name="channel_alias"),
     )
-    structural = np.asarray(metric_arrays["structural_residual"], dtype=np.float32)
-    table = ad.AnnData(X=structural.copy(), obs=source_obs.copy(), var=var)
+    residual = np.asarray(metric_arrays["zncc_residual"], dtype=np.float32)
+    table = ad.AnnData(X=residual.copy(), obs=source_obs.copy(), var=var)
     for name in METRIC_NAMES:
         table.layers[name] = np.asarray(metric_arrays[name], dtype=np.float32)
     table.obsm["spatial"] = np.asarray(spatial_um, dtype=float).copy()
     table.uns["alignment_qc"] = {
         "schema_version": ALIGNMENT_QC_SCHEMA_VERSION,
         "settings": dict(settings),
-        "round_summary": [dict(row) for row in summaries],
+        "channel_summary": [dict(row) for row in summaries],
         "channel_order": aliases,
         "reference_channel": reference,
+        "zncc_window": dict(window),
         "dense_artifact_path": str(artifact_path),
-        "flow_direction": "reference_to_moving",
     }
     return TableModel.parse(
         table,
@@ -764,8 +766,6 @@ def _build_alignment_table(
 
 
 def _persist_alignment_table(sdata: Any, table: Any) -> None:
-    # This deliberately writes only the additive table element. It does not call SpatialData.write(),
-    # write_transformations(), or any upstream finalize operation.
     sdata["alignment_qc"] = table
     try:
         sdata.delete_element_from_disk("alignment_qc")
@@ -796,9 +796,21 @@ def _planned_result(
         "compatibility": {
             "upstream_stages_rerun": False,
             "channel_map_modified": False,
-            "spatialdata_elements_written": ["alignment_qc"] if settings.get("write_spatialdata_table") else [],
+            "spatialdata_elements_written": (
+                ["alignment_qc"] if settings.get("write_spatialdata_table") else []
+            ),
         },
     }
+
+
+def _manifest_is_current(manifest: Mapping[str, Any] | None, settings: Mapping[str, Any]) -> bool:
+    return bool(
+        manifest
+        and manifest.get("schema_version") == ALIGNMENT_QC_SCHEMA_VERSION
+        and manifest.get("settings_hash") == _settings_hash(settings)
+        and list((manifest.get("settings") or {}).get("channels", []))
+        == list(settings["channels"])
+    )
 
 
 def run_alignment_qc(
@@ -809,7 +821,7 @@ def run_alignment_qc(
     dry_run: bool = False,
     return_sdata: bool = False,
 ) -> dict[str, Any]:
-    """Run alias-selected optical-flow QC against an existing canonical SpatialData store."""
+    """Run dense pre-alignment local ZNCC against an existing canonical SpatialData store."""
     config = ensure_config(config)
     slide = get_slide_config(config, slide_id)
     block = _alignment_block(slide)
@@ -824,7 +836,6 @@ def run_alignment_qc(
 
     settings = _resolved_settings(block)
     aliases = list(settings["channels"])
-    # Alias validation is intentionally the only channel semantic validation performed.
     resolve_channel_entries(config, slide_id, aliases)
     paths = _alignment_paths(slide)
     if dry_run:
@@ -833,18 +844,13 @@ def run_alignment_qc(
     store_path = paths["spatialdata_store"]
     if not store_path.exists():
         raise FileNotFoundError(f"Canonical SpatialData store does not exist: {store_path}")
-    if force:
-        _safe_remove_output(paths["output_dir"], slide_output_dir=Path(slide["output_dir"]))
 
     manifest = _load_manifest(paths["manifest_path"])
-    settings_hash = _settings_hash(settings)
-    if manifest is not None and manifest.get("settings_hash") != settings_hash:
-        raise ValueError("Existing alignment-QC outputs use incompatible settings; rerun with force=True.")
-    if paths["output_dir"].exists() and manifest is None:
-        raise ValueError(
-            f"Alignment-QC output exists without a valid manifest: {paths['output_dir']}. "
-            "Rerun with force=True to replace only this stage's artifacts."
-        )
+    output_exists = paths["output_dir"].exists()
+    if output_exists and not force and not _manifest_is_current(manifest, settings):
+        raise _artifact_error()
+    if force:
+        manifest = None
 
     read_zarr, TableModel = _import_spatialdata()
     ad = _import_anndata()
@@ -855,14 +861,17 @@ def run_alignment_qc(
         raise KeyError("Canonical SpatialData store is missing images['full_image'].")
     if "agg_cell_labels" not in sdata.tables:
         raise KeyError(
-            "Alignment QC requires the existing agg_cell_labels table; the canonical store was not modified."
+            "Alignment QC requires the existing agg_cell_labels table; "
+            "the canonical store was not modified."
         )
 
     levels = _image_levels(sdata.images["full_image"])
     available_aliases = _channel_names(levels[0][1])
     missing_from_image = [alias for alias in aliases if alias not in available_aliases]
     if missing_from_image:
-        raise KeyError(f"Configured aliases missing from canonical full_image: {', '.join(missing_from_image)}")
+        raise KeyError(
+            f"Configured aliases missing from canonical full_image: {', '.join(missing_from_image)}"
+        )
     selected = select_pyramid_level(
         levels,
         native_pixel_size_um=float(slide["pixel_size_um"]),
@@ -872,22 +881,40 @@ def run_alignment_qc(
     level_array = selected["array"]
     pixel_x = float(selected["pixel_size_x_um"])
     pixel_y = float(selected["pixel_size_y_um"])
+    window_y, window_x = zncc_window_shape(
+        settings["zncc_window_size_um"],
+        pixel_size_x_um=pixel_x,
+        pixel_size_y_um=pixel_y,
+    )
+    if window_y > selected["shape"][0] or window_x > selected["shape"][1]:
+        raise ValueError(
+            f"ZNCC window {(window_y, window_x)} exceeds selected image dimensions "
+            f"{tuple(selected['shape'])}."
+        )
+    window = {
+        "requested_size_um": settings["zncc_window_size_um"],
+        "pixels_x": window_x,
+        "pixels_y": window_y,
+        "realized_size_x_um": window_x * pixel_x,
+        "realized_size_y_um": window_y * pixel_y,
+    }
     radius_x, radius_y = neighborhood_radii_pixels(
         settings["cell_sampling_radius_um"],
         pixel_size_x_um=pixel_x,
         pixel_size_y_um=pixel_y,
     )
-    source_obs, instance_ids, spatial_um = _cell_observations(sdata.tables["agg_cell_labels"])
+    source_obs, instance_ids, spatial_um = _cell_observations(
+        sdata.tables["agg_cell_labels"]
+    )
     x_level = spatial_um[:, 0] / pixel_x
     y_level = spatial_um[:, 1] / pixel_y
 
     completed = set(int(value) for value in (manifest or {}).get("completed_indices", []))
-    if completed and not paths["zarr_path"].exists():
-        raise ValueError(
-            "Alignment-QC manifest has completed channels but alignment_qc.zarr is missing; rerun with force=True."
-        )
+    expected_indices = set(range(len(aliases)))
+    if completed - expected_indices or (completed and not paths["zarr_path"].exists()):
+        raise _artifact_error()
     if (
-        completed == set(range(len(aliases)))
+        completed == expected_indices
         and paths["zarr_path"].exists()
         and paths["summary_path"].exists()
         and (not settings["write_spatialdata_table"] or "alignment_qc" in sdata.tables)
@@ -904,21 +931,47 @@ def run_alignment_qc(
             result["sdata"] = sdata
         return result
 
+    print("[alignment-qc] preflighting configured images", flush=True)
+    scaling_by_alias: dict[str, dict[str, float]] = {}
+    reference_alias = settings["reference_channel"]
+    reference_scaled = None
+    for alias in aliases:
+        raw = _materialize_channel(level_array, alias)
+        try:
+            scaled, scaling = affine_scale_image(
+                raw,
+                scaling_percentiles=settings["scaling_percentiles"],
+            )
+        except ValueError as exc:
+            raise ValueError(f"Channel alias {alias!r}: {exc}") from exc
+        scaling_by_alias[alias] = scaling
+        if alias == reference_alias:
+            reference_scaled = scaled
+    if reference_scaled is None:
+        raise ValueError("Configured reference channel was not loaded.")
+    del raw, scaled
+
+    if force:
+        _safe_remove_output(paths["output_dir"], slide_output_dir=Path(slide["output_dir"]))
+        completed.clear()
     paths["output_dir"].mkdir(parents=True, exist_ok=True)
+    settings_hash = _settings_hash(settings)
     manifest = manifest or {
         "schema_version": ALIGNMENT_QC_SCHEMA_VERSION,
         "slide_id": slide_id,
         "settings_hash": settings_hash,
         "settings": settings,
         "completed_indices": [],
-        "round_summaries": [],
+        "channel_summaries": [],
         "complete": False,
         "spatialdata_table_written": False,
     }
     manifest.update(
         {
             "selected_level": {key: value for key, value in selected.items() if key != "array"},
+            "zncc_window": window,
             "sampling_radius_pixels": {"x": radius_x, "y": radius_y},
+            "scaling_bounds": scaling_by_alias,
             "spatialdata_store": str(store_path),
             "zarr_path": str(paths["zarr_path"]),
             "summary_path": str(paths["summary_path"]),
@@ -933,72 +986,63 @@ def run_alignment_qc(
         completed_indices=completed,
     )
     existing_summaries = {
-        int(row["acquisition_order"]): dict(row) for row in manifest.get("round_summaries", [])
+        int(row["acquisition_order"]): dict(row)
+        for row in manifest.get("channel_summaries", [])
     }
 
     started = perf_counter()
-    reference_alias = settings["reference_channel"]
     print(
-        f"[alignment-qc] loading reference={reference_alias!r} level={selected['name']} "
-        f"shape={tuple(selected['shape'])} resolution=({pixel_x:.4f}, {pixel_y:.4f}) um/px",
+        f"[alignment-qc] reference={reference_alias!r} level={selected['name']} "
+        f"shape={tuple(selected['shape'])} resolution=({pixel_x:.4f}, {pixel_y:.4f}) um/px "
+        f"window=({window_x}, {window_y}) px",
         flush=True,
     )
-    reference_raw = _materialize_channel(level_array, reference_alias)
-    reference_normalized, reference_normalization = normalize_percentile_image(
-        reference_raw,
-        lower_percentile=settings["lower_percentile"],
-        upper_percentile=settings["upper_percentile"],
-    )
-
     for index, alias in enumerate(aliases):
         if index in completed:
             print(f"[alignment-qc] resume: keeping completed channel {index}: {alias}", flush=True)
             continue
-        round_started = perf_counter()
+        channel_started = perf_counter()
         is_reference = alias == reference_alias
         print(f"[alignment-qc] processing channel {index}: {alias}", flush=True)
         if is_reference:
-            normalization = dict(reference_normalization)
-            zeros = np.zeros(reference_raw.shape, dtype=np.float32)
-            maps = {name: zeros.copy() for name in DENSE_METRIC_NAMES}
-            support = np.ones(len(instance_ids), dtype=np.float32)
+            maps = {
+                "zncc_correlation": np.ones(reference_scaled.shape, dtype=np.float32),
+                "zncc_residual": np.zeros(reference_scaled.shape, dtype=np.float32),
+            }
         else:
             moving_raw = _materialize_channel(level_array, alias)
-            moving_normalized, normalization = normalize_percentile_image(
+            moving_scaled, _ = affine_scale_image(
                 moving_raw,
-                lower_percentile=settings["lower_percentile"],
-                upper_percentile=settings["upper_percentile"],
+                scaling_percentiles=settings["scaling_percentiles"],
             )
-            flow_result = compute_flow_residual_maps(
-                reference_normalized,
-                moving_normalized,
-                pixel_size_x_um=pixel_x,
-                pixel_size_y_um=pixel_y,
-                flow_params=settings["optical_flow"],
-                ssim_window_size=settings["ssim_window_size"],
-            )
-            maps = {name: flow_result[name] for name in DENSE_METRIC_NAMES}
-            support = local_dapi_support(
-                reference_raw,
-                moving_raw,
-                x_level,
-                y_level,
-                radius_x=radius_x,
-                radius_y=radius_y,
-                reference_dynamic_range=reference_normalization["normalization_dynamic_range"],
+            maps = dense_local_zncc(
+                reference_scaled,
+                moving_scaled,
+                window_shape=(window_y, window_x),
+                minimum_local_std_fraction=settings["min_local_std_fraction"],
+                chunk_shape=tuple(settings["dense_chunks"]),
             )
 
-        for name in DENSE_METRIC_NAMES:
-            metric_group[name][:, index] = sample_neighborhood_nanmedian(
-                maps[name],
-                x_level,
-                y_level,
-                radius_x=radius_x,
-                radius_y=radius_y,
-            )
-        metric_group["dapi_support"][:, index] = support
+        if is_reference:
+            cell_values = {
+                "zncc_correlation": np.ones(len(instance_ids), dtype=np.float32),
+                "zncc_residual": np.zeros(len(instance_ids), dtype=np.float32),
+            }
+        else:
+            cell_values = {
+                name: sample_neighborhood_nanmedian(
+                    maps[name],
+                    x_level,
+                    y_level,
+                    radius_x=radius_x,
+                    radius_y=radius_y,
+                )
+                for name in METRIC_NAMES
+            }
+        for name, values in cell_values.items():
+            metric_group[name][:, index] = values
         if settings["save_dense_maps"]:
-            _write_dense_round(
+            _write_dense_channel(
                 root,
                 index=index,
                 alias=alias,
@@ -1006,21 +1050,23 @@ def run_alignment_qc(
                 chunks=tuple(settings["dense_chunks"]),
                 is_reference=is_reference,
             )
-        summary = _round_summary(
+        summary = _channel_summary(
             alias=alias,
             index=index,
             is_reference=is_reference,
-            normalization=normalization,
+            scaling=scaling_by_alias[alias],
             maps=maps,
-            support=support,
+            cell_values=cell_values,
         )
-        summary["processing_seconds"] = round(perf_counter() - round_started, 3)
+        summary["processing_seconds"] = round(perf_counter() - channel_started, 3)
         existing_summaries[index] = summary
         completed.add(index)
         root.attrs["completed_indices"] = sorted(completed)
         manifest["completed_indices"] = sorted(completed)
-        manifest["round_summaries"] = [existing_summaries[key] for key in sorted(existing_summaries)]
-        _write_summary_csv(paths["summary_path"], manifest["round_summaries"])
+        manifest["channel_summaries"] = [
+            existing_summaries[key] for key in sorted(existing_summaries)
+        ]
+        _write_summary_csv(paths["summary_path"], manifest["channel_summaries"])
         _write_json_atomic(paths["manifest_path"], manifest)
 
     metric_arrays = {name: metric_group[name][:] for name in METRIC_NAMES}
@@ -1031,8 +1077,9 @@ def run_alignment_qc(
             spatial_um=spatial_um,
             settings=settings,
             metric_arrays=metric_arrays,
-            summaries=manifest["round_summaries"],
+            summaries=manifest["channel_summaries"],
             artifact_path=paths["zarr_path"],
+            window=window,
             TableModel=TableModel,
             ad=ad,
         )
@@ -1056,6 +1103,7 @@ def run_alignment_qc(
         "summary_path": str(paths["summary_path"]),
         "manifest_path": str(paths["manifest_path"]),
         "selected_level": manifest["selected_level"],
+        "zncc_window": window,
         "sampling_radius_pixels": manifest["sampling_radius_pixels"],
         "completed_channels": aliases,
         "cell_count": int(len(instance_ids)),

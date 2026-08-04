@@ -145,7 +145,7 @@ def build_parser() -> argparse.ArgumentParser:
 
     alignment_parser = subparsers.add_parser(
         "alignment-qc",
-        help="Run alias-selected optical-flow QC against an existing canonical SpatialData store.",
+        help="Run alias-selected ZNCC QC against an existing canonical SpatialData store.",
     )
     _add_common_arguments(alignment_parser)
     alignment_parser.add_argument(
