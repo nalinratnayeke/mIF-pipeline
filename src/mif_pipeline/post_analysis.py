@@ -532,6 +532,20 @@ def decode_perturbview(
         raise ValueError(f"Codebook contains tuples incompatible with the decoding rounds: {invalid_tuples[:10]}")
     if unknown_label == no_call_label:
         raise ValueError("unknown_label and no_call_label must be different.")
+    active_indices_by_round = {
+        round_name: sorted(
+            {int(values[round_index]) for values in codebook}
+        )
+        for round_index, round_name in enumerate(ordered_rounds)
+    }
+    inactive_indices_by_round = {
+        round_name: [
+            index
+            for index in range(bits_per_round)
+            if index not in active_indices_by_round[round_name]
+        ]
+        for round_name in ordered_rounds
+    }
 
     numeric = frame[all_channels].apply(pd.to_numeric, errors="coerce")
     finite = np.isfinite(numeric.to_numpy(dtype=float)).all(axis=1)
@@ -564,10 +578,15 @@ def decode_perturbview(
         raw = numeric.loc[eligible_index, channels].to_numpy(dtype=float)
         scales = np.percentile(raw, scaling_percentile, axis=0)
         scales = np.where(scales > 0, scales, 1.0)
-        normalized = raw / (scales[None, :] + EPS)
-        top_indices = normalized.argmax(axis=1)
-        top_values = normalized[np.arange(len(normalized)), top_indices]
-        second_values = np.partition(normalized, -2, axis=1)[:, -2]
+        active_indices = np.asarray(active_indices_by_round[round_name], dtype=int)
+        normalized = raw[:, active_indices] / (scales[None, active_indices] + EPS)
+        active_top_indices = normalized.argmax(axis=1)
+        top_indices = active_indices[active_top_indices]
+        top_values = normalized[np.arange(len(normalized)), active_top_indices]
+        if normalized.shape[1] == 1:
+            second_values = np.zeros(len(normalized), dtype=float)
+        else:
+            second_values = np.partition(normalized, -2, axis=1)[:, -2]
         ratios = top_values / (second_values + EPS)
 
         channel_thresholds: dict[str, float] = {}
@@ -590,12 +609,15 @@ def decode_perturbview(
         quality_by_round.append(round_quality)
 
         prefix = f"decode_{round_name}"
-        calls[f"{prefix}_top_idx"] = pd.Series(pd.NA, index=calls.index, dtype="Int32")
+        top_idx_full = np.full(len(calls), -1, dtype=np.int32)
+        top_idx_full[eligible] = top_indices
+        top_idx_column = pd.array(top_idx_full, dtype="Int32")
+        top_idx_column[~eligible] = pd.NA
+        calls[f"{prefix}_top_idx"] = top_idx_column
         for suffix in ("ratio", "raw_top", "top_threshold", "top_fold", "quality"):
             calls[f"{prefix}_{suffix}"] = np.nan
         for suffix in ("pass_top", "pass_ratio", "pass"):
             calls[f"{prefix}_{suffix}"] = False
-        calls.loc[eligible_index, f"{prefix}_top_idx"] = top_indices
         calls.loc[eligible_index, f"{prefix}_ratio"] = ratios
         calls.loc[eligible_index, f"{prefix}_raw_top"] = winner_values
         calls.loc[eligible_index, f"{prefix}_top_threshold"] = winner_thresholds
@@ -683,6 +705,9 @@ def decode_perturbview(
             "null_quantile": float(null_quantile),
             "scaling_percentile": float(scaling_percentile),
             "bits_per_round": int(bits_per_round),
+            "active_channel_indices_by_round": active_indices_by_round,
+            "inactive_channel_indices_by_round": inactive_indices_by_round,
+            "inactive_channels_are_excluded_from_winner_and_runner_up_selection": True,
             "unknown_label": str(unknown_label),
             "no_call_label": str(no_call_label),
             "threshold_fit_population": "tumor_assigned_complete_finite_nuclear_cells",

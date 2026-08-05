@@ -70,6 +70,8 @@ These are now deliberate and should be preserved unless the user asks for a chan
   and alignment tables explicitly by instance ID.
 - Decode combinatorial FISH measurements from `agg_nuclear_labels` unless the user requests a
   different compartment.
+- Derive active bit positions from the supplied codebook and exclude positions unused across an
+  entire round from winner and runner-up selection while retaining their raw diagnostics.
 - Keep Nimbus and alignment measurements on their native feature axes rather than padding them into
   raw-intensity AnnData layers.
 - Assign tumors through vector-only `cell_boundaries` queries and join `cell_id` explicitly to the

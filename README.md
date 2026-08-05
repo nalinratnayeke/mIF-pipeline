@@ -225,8 +225,10 @@ label ID before comparison. The exported AnnData uses whole-cell intensities in
 `X`, nuclear and optional cytoplasm intensities in same-axis layers, native Nimbus features in
 `obsm["nimbus"]`, ZNCC correlation in `obsm["alignment_zncc"]`, and slide-local micron coordinates
 in `obsm["spatial"]`. If cytoplasm aggregation is absent it is not synthesized; mixed cohorts use
-`NaN`, never zero, for slides without that measurement. Decoding uses vectorized round-combination
-lookups, and the already-materialized nuclear matrix is reused during AnnData construction. The
+`NaN`, never zero, for slides without that measurement. Decoding derives the channel positions used
+in each round directly from the codebook; unused positions remain in raw diagnostics but cannot
+participate as the winner or runner-up. It uses vectorized round-combination lookups, and the
+already-materialized nuclear matrix is reused during AnnData construction. The
 H5AD is the authoritative per-cell artifact; the redundant full observation CSV is disabled by
 default through `WRITE_CELL_ANNOTATIONS_CSV = False`. Small summary CSVs, JSON, and figures are
 still written. The workflow never writes derived elements back to canonical SpatialData.

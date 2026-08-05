@@ -332,7 +332,10 @@ are ranked per cell, the winner-to-runner-up ratio is calculated, and the winnin
 compared with a channel-specific non-winner distribution. One threshold set is estimated per slide
 from tumor-assigned cells with complete finite decoding measurements. Passing round tuples map to
 the supplied codebook through a lookup over the small set of unique observed combinations; an
-absent tuple is `UNK`, whereas a cell that fails any round is a no-call.
+absent tuple is `UNK`, whereas a cell that fails any round is a no-call. Channel positions unused
+by every codebook tuple in a round are retained in scaling and threshold diagnostics but excluded
+from winner and runner-up selection, preventing blank channels from being amplified into calls by
+independent percentile scaling.
 
 The integrated cell table uses composite `slide_id_instance_id` observation names. Whole-cell
 intensity is stored in `X`, with nuclear and optional cytoplasm intensity in same-axis layers.

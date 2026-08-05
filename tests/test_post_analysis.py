@@ -311,6 +311,32 @@ def test_codebook_and_decoder_handle_eligible_missing_and_unknown_cells(tmp_path
     assert result.funnel.loc["R1", "eligible_cells"] == 2
 
 
+def test_decoder_excludes_channel_positions_unused_by_codebook():
+    intensities = pd.DataFrame(
+        {
+            "signal_A": [10.0, 1.0],
+            "signal_B": [1.0, 10.0],
+            "blank": [1.0, 100.0],
+        },
+        index=["1", "2"],
+    )
+
+    result = decode_perturbview(
+        intensities,
+        round_channels={"R1": ["signal_A", "signal_B", "blank"]},
+        codebook={(0,): "guide_A", (1,): "guide_B"},
+        bits_per_round=3,
+        ratio_min=1.0,
+        null_quantile=50.0,
+        scaling_percentile=50.0,
+    )
+
+    assert result.cell_calls["decode_R1_top_idx"].tolist() == [0, 1]
+    assert result.settings["active_channel_indices_by_round"] == {"R1": [0, 1]}
+    assert result.settings["inactive_channel_indices_by_round"] == {"R1": [2]}
+    assert result.scaling_values["R1"]["blank"] == pytest.approx(50.5)
+
+
 def _decode_result(ids):
     calls = pd.DataFrame(
         {
