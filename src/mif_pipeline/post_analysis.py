@@ -309,7 +309,6 @@ def assign_tumor_ids(
         )
 
     assignments = pd.Series(unassigned_label, index=master_ids, name="tumor_id", dtype="string")
-    memberships: dict[str, list[str]] = {}
     query = polygon_query_func or _import_polygon_query()
     SpatialData = _import_spatialdata_class()
     vector_sdata = SpatialData(shapes={shape_name: cell_shapes})
@@ -345,29 +344,37 @@ def assign_tumor_ids(
                 ],
                 name="instance_id",
             )
-        elapsed_seconds = perf_counter() - started_at
-        if progress is not None:
-            progress(
-                f"Finished tumor {tumor_index}/{tumor_count}: {tumor_id} — "
-                f"{len(selected):,} cells in {elapsed_seconds:.1f} s"
-            )
+        query_seconds = perf_counter() - started_at
+        bookkeeping_started_at = perf_counter()
+        if selected.has_duplicates:
+            duplicated = selected[selected.duplicated()].unique().tolist()[:10]
+            raise ValueError(f"polygon_query returned duplicate vector IDs: {duplicated}")
         unknown = selected.difference(master_ids)
         if len(unknown):
             raise ValueError(
                 f"polygon_query returned vector IDs absent from {table_name}: "
                 f"{unknown.tolist()[:10]}"
             )
-        for instance_id in selected:
-            memberships.setdefault(str(instance_id), []).append(tumor_id)
-
-    overlaps = {cell_id: ids for cell_id, ids in memberships.items() if len(ids) > 1}
-    if overlaps:
-        examples = list(overlaps.items())[:10]
-        raise ValueError(
-            f"Tumor polygons assign {len(overlaps)} cells to more than one tumor; examples: {examples}"
-        )
-    for instance_id, tumor_membership in memberships.items():
-        assignments.loc[instance_id] = tumor_membership[0]
+        previous = assignments.loc[selected]
+        overlap_mask = previous.ne(unassigned_label).to_numpy(dtype=bool)
+        if overlap_mask.any():
+            overlap_ids = selected[overlap_mask]
+            examples = [
+                (str(instance_id), [str(previous.loc[instance_id]), tumor_id])
+                for instance_id in overlap_ids[:10]
+            ]
+            raise ValueError(
+                f"Tumor polygons assign {len(overlap_ids)} cells to more than one tumor; "
+                f"examples: {examples}"
+            )
+        assignments.loc[selected] = tumor_id
+        bookkeeping_seconds = perf_counter() - bookkeeping_started_at
+        if progress is not None:
+            progress(
+                f"Finished tumor {tumor_index}/{tumor_count}: {tumor_id} — "
+                f"{len(selected):,} cells; query {query_seconds:.1f} s, "
+                f"ID assignment {bookkeeping_seconds:.1f} s"
+            )
 
     categories = [unassigned_label, *tumors.tumor_ids]
     assignments = assignments.astype(pd.CategoricalDtype(categories=categories))

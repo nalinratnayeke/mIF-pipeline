@@ -251,9 +251,9 @@ def test_tumor_assignment_uses_vector_cell_ids_and_rejects_overlaps(monkeypatch)
         "T2": 1,
     }
     assert progress_messages[0] == "Querying tumor 1/2: T1"
-    assert progress_messages[1].startswith("Finished tumor 1/2: T1 — 2 cells in ")
+    assert progress_messages[1].startswith("Finished tumor 1/2: T1 — 2 cells; query ")
     assert progress_messages[2] == "Querying tumor 2/2: T2"
-    assert progress_messages[3].startswith("Finished tumor 2/2: T2 — 1 cells in ")
+    assert progress_messages[3].startswith("Finished tumor 2/2: T2 — 1 cells; query ")
 
     def overlapping_query(_sdata, *, polygon, **kwargs):
         ids = [1, 7] if polygon == "g1" else [7, 20]
