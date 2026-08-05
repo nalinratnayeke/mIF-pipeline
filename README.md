@@ -211,6 +211,12 @@ not pipeline stages. Use the read-only
 after SpatialData assembly and alignment QC. It validates full-resolution pixel-coordinate tumor
 GeoJSON metadata, converts the polygons to global microns, and assigns cells through
 `polygon_query`. Multi-tumor cell assignments are errors rather than last-polygon-wins updates.
+Metadata-free annotation exports are supported only through the notebook's explicit
+`allow_metadata_free_geojson` setting. In that mode the filename must contain the slide ID, every
+polygon must fit the canonical full-resolution canvas, each feature must have a unique
+`properties.name`, and source feature UUIDs are retained in the exported provenance. Labels can be
+overridden through the slide's ordered `tumor_ids` notebook setting; the list must contain exactly
+one unique label per feature.
 
 Guide calls use ordered exact aliases from `agg_nuclear_labels`, while `agg_cell_labels.instance_id`
 defines the master cell index for every join. The exported AnnData uses whole-cell intensities in

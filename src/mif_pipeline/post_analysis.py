@@ -28,6 +28,7 @@ class TumorGeoJSON:
     tumor_ids: tuple[str, ...]
     pixel_geometries: tuple[Any, ...]
     global_geometries: tuple[Any, ...]
+    source_feature_ids: tuple[str, ...]
 
 
 @dataclass(frozen=True)
@@ -106,6 +107,8 @@ def read_tumor_geojson(
     expected_slide_id: str,
     expected_pixel_size_um: float,
     expected_canvas_shape_yx: Sequence[int],
+    allow_metadata_free: bool = False,
+    tumor_id_overrides: Sequence[str] | None = None,
 ) -> TumorGeoJSON:
     """Read pixel-coordinate tumor polygons and validate their slide metadata."""
 
@@ -116,51 +119,102 @@ def read_tumor_geojson(
     if payload.get("type") != "FeatureCollection":
         raise ValueError(f"{geojson_path} must contain a GeoJSON FeatureCollection.")
 
-    metadata = payload.get("mif_pipeline")
-    if not isinstance(metadata, dict):
-        raise ValueError(f"{geojson_path} is missing the top-level 'mif_pipeline' metadata block.")
-    if metadata.get("slide_id") != expected_slide_id:
-        raise ValueError(
-            f"GeoJSON slide_id={metadata.get('slide_id')!r} does not match {expected_slide_id!r}."
-        )
-    if metadata.get("coordinate_units") != "intrinsic_full_resolution_pixels":
-        raise ValueError("Tumor GeoJSON must declare intrinsic_full_resolution_pixels coordinates.")
-    if metadata.get("axis_order") != "x_y":
-        raise ValueError("Tumor GeoJSON must declare axis_order='x_y'.")
-
-    try:
-        file_pixel_size = float(metadata["pixel_size_um"])
-    except (KeyError, TypeError, ValueError) as exc:
-        raise ValueError("Tumor GeoJSON must declare a numeric pixel_size_um.") from exc
-    if not np.isclose(file_pixel_size, float(expected_pixel_size_um)):
-        raise ValueError(
-            f"GeoJSON pixel size {file_pixel_size} does not match store value "
-            f"{float(expected_pixel_size_um)}."
-        )
-
-    try:
-        file_canvas = tuple(int(value) for value in metadata["canvas_shape_yx"])
-    except (KeyError, TypeError, ValueError) as exc:
-        raise ValueError("Tumor GeoJSON must declare canvas_shape_yx.") from exc
     expected_canvas = tuple(int(value) for value in expected_canvas_shape_yx)
-    if len(file_canvas) != 2 or file_canvas != expected_canvas:
-        raise ValueError(f"GeoJSON canvas {file_canvas} does not match store canvas {expected_canvas}.")
+    if len(expected_canvas) != 2 or any(value <= 0 for value in expected_canvas):
+        raise ValueError(f"Expected store canvas must be a positive (y, x) pair, got {expected_canvas}.")
+    metadata = payload.get("mif_pipeline")
+    metadata_free = not isinstance(metadata, dict)
+    if metadata_free:
+        if not allow_metadata_free:
+            raise ValueError(
+                f"{geojson_path} is missing the top-level 'mif_pipeline' metadata block. "
+                "Set allow_metadata_free=True only for verified full-resolution pixel annotations."
+            )
+        if expected_slide_id not in geojson_path.stem:
+            raise ValueError(
+                f"Metadata-free GeoJSON filename {geojson_path.name!r} does not contain the "
+                f"expected slide ID {expected_slide_id!r}."
+            )
+        file_pixel_size = float(expected_pixel_size_um)
+        file_canvas = expected_canvas
+        metadata = {
+            "slide_id": expected_slide_id,
+            "coordinate_units": "intrinsic_full_resolution_pixels",
+            "axis_order": "x_y",
+            "canvas_shape_yx": list(expected_canvas),
+            "pixel_size_um": file_pixel_size,
+            "metadata_source": "explicit_notebook_inputs_and_polygon_bounds",
+            "source_filename": geojson_path.name,
+        }
+    else:
+        metadata = dict(metadata)
+        if metadata.get("slide_id") != expected_slide_id:
+            raise ValueError(
+                f"GeoJSON slide_id={metadata.get('slide_id')!r} does not match {expected_slide_id!r}."
+            )
+        if metadata.get("coordinate_units") != "intrinsic_full_resolution_pixels":
+            raise ValueError("Tumor GeoJSON must declare intrinsic_full_resolution_pixels coordinates.")
+        if metadata.get("axis_order") != "x_y":
+            raise ValueError("Tumor GeoJSON must declare axis_order='x_y'.")
+        try:
+            file_pixel_size = float(metadata["pixel_size_um"])
+        except (KeyError, TypeError, ValueError) as exc:
+            raise ValueError("Tumor GeoJSON must declare a numeric pixel_size_um.") from exc
+        if not np.isclose(file_pixel_size, float(expected_pixel_size_um)):
+            raise ValueError(
+                f"GeoJSON pixel size {file_pixel_size} does not match store value "
+                f"{float(expected_pixel_size_um)}."
+            )
+        try:
+            file_canvas = tuple(int(value) for value in metadata["canvas_shape_yx"])
+        except (KeyError, TypeError, ValueError) as exc:
+            raise ValueError("Tumor GeoJSON must declare canvas_shape_yx.") from exc
+        if len(file_canvas) != 2 or file_canvas != expected_canvas:
+            raise ValueError(
+                f"GeoJSON canvas {file_canvas} does not match store canvas {expected_canvas}."
+            )
 
     features = payload.get("features")
     if not isinstance(features, list) or not features:
         raise ValueError(f"No tumor features found in {geojson_path}.")
+    override_ids: list[str] | None = None
+    if tumor_id_overrides is not None:
+        override_ids = [str(value).strip() for value in tumor_id_overrides]
+        if len(override_ids) != len(features):
+            raise ValueError(
+                f"tumor_id_overrides has {len(override_ids)} values for {len(features)} features."
+            )
+        if any(not value for value in override_ids) or len(set(override_ids)) != len(override_ids):
+            raise ValueError("tumor_id_overrides must contain unique non-empty labels.")
 
     shape_geometry, scale_geometry = _import_shapely()
     tumor_ids: list[str] = []
+    tumor_id_sources: list[str] = []
+    source_feature_ids: list[str] = []
     pixel_geometries: list[Any] = []
     global_geometries: list[Any] = []
     for index, feature in enumerate(features):
         if not isinstance(feature, dict):
             raise ValueError(f"GeoJSON feature {index} is not a mapping.")
         properties = feature.get("properties") or {}
-        tumor_id = str(properties.get("tumor_id", "")).strip()
+        if override_ids is not None:
+            tumor_id = override_ids[index]
+            tumor_id_source = "explicit_tumor_id_overrides"
+        elif str(properties.get("tumor_id", "")).strip():
+            tumor_id = str(properties["tumor_id"]).strip()
+            tumor_id_source = "feature_properties.tumor_id"
+        elif metadata_free and str(properties.get("name", "")).strip():
+            tumor_id = str(properties["name"]).strip()
+            tumor_id_source = "feature_properties.name"
+        else:
+            tumor_id = ""
+            tumor_id_source = "missing"
         if not tumor_id:
-            raise ValueError(f"GeoJSON feature {index} is missing a non-empty tumor_id.")
+            expected_property = "name" if metadata_free else "tumor_id"
+            raise ValueError(
+                f"GeoJSON feature {index} is missing a non-empty properties.{expected_property}."
+            )
+        source_feature_id = str(feature.get("id", tumor_id)).strip() or tumor_id
         feature_slide = properties.get("slide_id")
         if feature_slide is not None and str(feature_slide) != expected_slide_id:
             raise ValueError(
@@ -176,7 +230,16 @@ def read_tumor_geojson(
             )
         if not geometry.is_valid:
             raise ValueError(f"Tumor {tumor_id!r} has an invalid geometry.")
+        min_x, min_y, max_x, max_y = (float(value) for value in geometry.bounds)
+        canvas_y, canvas_x = expected_canvas
+        if min_x < 0 or min_y < 0 or max_x > canvas_x or max_y > canvas_y:
+            raise ValueError(
+                f"Tumor {tumor_id!r} bounds {(min_x, min_y, max_x, max_y)} fall outside "
+                f"the full-resolution (y, x) canvas {expected_canvas}."
+            )
         tumor_ids.append(tumor_id)
+        tumor_id_sources.append(tumor_id_source)
+        source_feature_ids.append(source_feature_id)
         pixel_geometries.append(geometry)
         global_geometries.append(
             scale_geometry(
@@ -190,6 +253,13 @@ def read_tumor_geojson(
     duplicates = pd.Index(tumor_ids)[pd.Index(tumor_ids).duplicated()].unique().tolist()
     if duplicates:
         raise ValueError(f"Tumor IDs must be unique; duplicates: {duplicates}")
+    metadata["tumor_id_source"] = (
+        tumor_id_sources[0]
+        if len(set(tumor_id_sources)) == 1
+        else "mixed_feature_properties"
+    )
+    metadata["source_feature_ids"] = list(source_feature_ids)
+    metadata["resolved_tumor_ids"] = list(tumor_ids)
 
     return TumorGeoJSON(
         path=geojson_path,
@@ -197,6 +267,7 @@ def read_tumor_geojson(
         tumor_ids=tuple(tumor_ids),
         pixel_geometries=tuple(pixel_geometries),
         global_geometries=tuple(global_geometries),
+        source_feature_ids=tuple(source_feature_ids),
     )
 
 

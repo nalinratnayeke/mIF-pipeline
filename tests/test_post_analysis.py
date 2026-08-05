@@ -97,6 +97,7 @@ class FakeGeometry:
         self.is_empty = False
         self.is_valid = True
         self.geom_type = "Polygon"
+        self.bounds = (0.0, 0.0, 10.0, 10.0)
 
 
 def _geojson_payload():
@@ -144,6 +145,7 @@ def test_tumor_geojson_validates_metadata_and_scales_to_microns(monkeypatch, tmp
     )
 
     assert tumors.tumor_ids == ("tumor_001",)
+    assert tumors.source_feature_ids == ("tumor_001",)
     assert tumors.global_geometries[0].scale_factor == (0.5, 0.5, (0.0, 0.0))
 
     payload = _geojson_payload()
@@ -158,6 +160,70 @@ def test_tumor_geojson_validates_metadata_and_scales_to_microns(monkeypatch, tmp
         )
 
 
+def test_metadata_free_annotation_geojson_uses_feature_names(monkeypatch, tmp_path: Path):
+    monkeypatch.setattr(
+        analysis_module,
+        "_import_shapely",
+        lambda: (
+            lambda payload: FakeGeometry(payload),
+            lambda geometry, xfact, yfact, origin: FakeGeometry(
+                geometry.payload, scale_factor=(xfact, yfact, origin)
+            ),
+        ),
+    )
+    payload = _geojson_payload()
+    payload.pop("mif_pipeline")
+    payload["features"][0]["id"] = "annotation-uuid"
+    payload["features"][0]["properties"] = {
+        "objectType": "annotation",
+        "name": "C2_A_NH",
+    }
+    path = tmp_path / "SLIDE-A.geojson"
+    path.write_text(json.dumps(payload), encoding="utf-8")
+
+    with pytest.raises(ValueError, match="allow_metadata_free=True"):
+        read_tumor_geojson(
+            path,
+            expected_slide_id="SLIDE-A",
+            expected_pixel_size_um=0.5,
+            expected_canvas_shape_yx=(100, 200),
+        )
+
+    tumors = read_tumor_geojson(
+        path,
+        expected_slide_id="SLIDE-A",
+        expected_pixel_size_um=0.5,
+        expected_canvas_shape_yx=(100, 200),
+        allow_metadata_free=True,
+    )
+    assert tumors.tumor_ids == ("C2_A_NH",)
+    assert tumors.source_feature_ids == ("annotation-uuid",)
+    assert tumors.metadata["metadata_source"] == "explicit_notebook_inputs_and_polygon_bounds"
+    assert tumors.metadata["tumor_id_source"] == "feature_properties.name"
+
+    named = read_tumor_geojson(
+        path,
+        expected_slide_id="SLIDE-A",
+        expected_pixel_size_um=0.5,
+        expected_canvas_shape_yx=(100, 200),
+        allow_metadata_free=True,
+        tumor_id_overrides=["tumor_left"],
+    )
+    assert named.tumor_ids == ("tumor_left",)
+    assert named.metadata["tumor_id_source"] == "explicit_tumor_id_overrides"
+
+    payload["features"][0]["properties"] = {"objectType": "annotation"}
+    path.write_text(json.dumps(payload), encoding="utf-8")
+    with pytest.raises(ValueError, match="properties.name"):
+        read_tumor_geojson(
+            path,
+            expected_slide_id="SLIDE-A",
+            expected_pixel_size_um=0.5,
+            expected_canvas_shape_yx=(100, 200),
+            allow_metadata_free=True,
+        )
+
+
 def test_tumor_assignment_uses_instance_ids_and_rejects_overlaps():
     master = DummyTable(np.ones((3, 1)), [1, 7, 20], ["DAPI"])
     sdata = types.SimpleNamespace(tables={"agg_cell_labels": master})
@@ -167,6 +233,7 @@ def test_tumor_assignment_uses_instance_ids_and_rejects_overlaps():
         tumor_ids=("T1", "T2"),
         pixel_geometries=("p1", "p2"),
         global_geometries=("g1", "g2"),
+        source_feature_ids=("source-1", "source-2"),
     )
 
     def query(_sdata, *, polygon, **kwargs):
