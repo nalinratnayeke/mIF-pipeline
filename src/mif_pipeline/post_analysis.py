@@ -11,6 +11,7 @@ import json
 import re
 from dataclasses import dataclass
 from pathlib import Path
+from time import perf_counter
 from typing import Any, Callable, Mapping, Sequence
 
 import numpy as np
@@ -259,6 +260,7 @@ def assign_tumor_ids(
     coordinate_system: str = "global",
     unassigned_label: str = "unassigned",
     polygon_query_func: Callable[..., Any] | None = None,
+    progress: Callable[[str], None] | None = None,
 ) -> tuple[pd.Series, pd.DataFrame]:
     """Assign master cells to tumor polygons without mutating ``sdata``."""
 
@@ -270,7 +272,13 @@ def assign_tumor_ids(
     memberships: dict[str, list[str]] = {}
     query = polygon_query_func or _import_polygon_query()
 
-    for tumor_id, polygon in zip(tumors.tumor_ids, tumors.global_geometries):
+    tumor_count = len(tumors.tumor_ids)
+    for tumor_index, (tumor_id, polygon) in enumerate(
+        zip(tumors.tumor_ids, tumors.global_geometries), start=1
+    ):
+        if progress is not None:
+            progress(f"Querying tumor {tumor_index}/{tumor_count}: {tumor_id}")
+        started_at = perf_counter()
         try:
             queried = query(
                 sdata,
@@ -284,6 +292,12 @@ def assign_tumor_ids(
             selected = pd.Index([], dtype="object", name="instance_id")
         else:
             selected = _table_instance_ids(queried.tables[table_name], table_name=table_name)
+        elapsed_seconds = perf_counter() - started_at
+        if progress is not None:
+            progress(
+                f"Finished tumor {tumor_index}/{tumor_count}: {tumor_id} — "
+                f"{len(selected):,} cells in {elapsed_seconds:.1f} s"
+            )
         unknown = selected.difference(master_ids)
         if len(unknown):
             raise ValueError(

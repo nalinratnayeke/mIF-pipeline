@@ -220,13 +220,23 @@ def test_tumor_assignment_uses_instance_ids_and_rejects_overlaps():
         selected = DummyTable(np.ones((len(ids), 1)), ids, ["DAPI"])
         return types.SimpleNamespace(tables={"agg_cell_labels": selected})
 
-    assignments, summary = assign_tumor_ids(sdata, tumors, polygon_query_func=query)
+    progress_messages = []
+    assignments, summary = assign_tumor_ids(
+        sdata,
+        tumors,
+        polygon_query_func=query,
+        progress=progress_messages.append,
+    )
     assert assignments.astype(str).to_dict() == {"1": "T1", "7": "T1", "20": "T2"}
     assert summary.set_index("tumor_id")["n_cells"].to_dict() == {
         "unassigned": 0,
         "T1": 2,
         "T2": 1,
     }
+    assert progress_messages[0] == "Querying tumor 1/2: T1"
+    assert progress_messages[1].startswith("Finished tumor 1/2: T1 — 2 cells in ")
+    assert progress_messages[2] == "Querying tumor 2/2: T2"
+    assert progress_messages[3].startswith("Finished tumor 2/2: T2 — 1 cells in ")
 
     def overlapping_query(_sdata, *, polygon, **kwargs):
         ids = [1, 7] if polygon == "g1" else [7, 20]
