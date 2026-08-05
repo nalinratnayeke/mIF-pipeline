@@ -209,7 +209,9 @@ Tumor annotation and combinatorial FISH decoding remain an interactive post-anal
 not pipeline stages. Use the read-only
 [`tumor_annotation_perturbview_decode.ipynb`](prototyping/tumor_annotation_perturbview_decode.ipynb)
 after SpatialData assembly and alignment QC. It validates full-resolution pixel-coordinate tumor
-GeoJSONs, converts the polygons to global microns, and assigns cells through `polygon_query`. Every
+GeoJSONs, converts the polygons to global microns, and queries a temporary vector-only SpatialData
+object containing `cell_boundaries`. Returned numeric `cell_ID` values are normalized and joined
+explicitly to the decorated instance IDs in `agg_cell_labels`. Every
 coordinate is interpreted directly as a full-resolution `(x, y)` pixel coordinate; pixel size and
 canvas dimensions come from the loaded slide, not from GeoJSON metadata. Every polygon must fit the
 canonical canvas and have a unique `properties.name` or `properties.tumor_id`. Source feature UUIDs

@@ -76,6 +76,16 @@ def _import_polygon_query() -> Callable[..., Any]:
     return polygon_query
 
 
+def _import_spatialdata_class() -> Any:
+    try:
+        from spatialdata import SpatialData
+    except ImportError as exc:  # pragma: no cover - exercised in the SpatialData environment
+        raise ImportError(
+            "Tumor annotation requires 'spatialdata' in the active SpatialData environment."
+        ) from exc
+    return SpatialData
+
+
 def base_raster_shape(element: Any) -> tuple[int, int]:
     """Return the base-level ``(y, x)`` shape from a raster or image pyramid."""
 
@@ -226,6 +236,25 @@ def read_tumor_geojson(
     )
 
 
+def _normalize_instance_id(value: Any) -> str:
+    if pd.isna(value):
+        raise ValueError("Instance IDs must not be missing.")
+    if isinstance(value, (int, np.integer)):
+        return str(int(value))
+    if isinstance(value, (float, np.floating)) and np.isfinite(value) and value.is_integer():
+        return str(int(value))
+    text = str(value).strip()
+    decorated = re.fullmatch(
+        r"(\d+)_(?:cell|nuclear|cytoplasm)_labels(?:_[A-Za-z0-9]+)?",
+        text,
+    )
+    if decorated is not None:
+        return str(int(decorated.group(1)))
+    if re.fullmatch(r"\d+", text):
+        return str(int(text))
+    return text
+
+
 def _table_instance_ids(table: Any, *, table_name: str) -> pd.Index:
     obs = table.obs
     if "instance_id" in obs.columns:
@@ -233,19 +262,7 @@ def _table_instance_ids(table: Any, *, table_name: str) -> pd.Index:
     else:
         raw_ids = obs.index
 
-    def normalize(value: Any) -> str:
-        text = str(value).strip()
-        decorated = re.fullmatch(
-            r"(\d+)_(?:cell|nuclear|cytoplasm)_labels(?:_[A-Za-z0-9]+)?",
-            text,
-        )
-        if decorated is not None:
-            return str(int(decorated.group(1)))
-        if re.fullmatch(r"\d+", text):
-            return str(int(text))
-        return text
-
-    ids = pd.Index([normalize(value) for value in raw_ids], name="instance_id")
+    ids = pd.Index([_normalize_instance_id(value) for value in raw_ids], name="instance_id")
     if ids.has_duplicates:
         duplicated = ids[ids.duplicated()].unique().tolist()[:10]
         raise ValueError(f"{table_name} contains duplicate instance IDs: {duplicated}")
@@ -262,15 +279,40 @@ def assign_tumor_ids(
     polygon_query_func: Callable[..., Any] | None = None,
     progress: Callable[[str], None] | None = None,
 ) -> tuple[pd.Series, pd.DataFrame]:
-    """Assign master cells to tumor polygons without mutating ``sdata``."""
+    """Assign master cells by querying vector boundaries and joining their instance IDs."""
 
+    shape_name = "cell_boundaries"
+    shape_instance_key = "cell_ID"
     if table_name not in sdata.tables:
         raise KeyError(f"SpatialData store is missing required table {table_name!r}.")
+    if shape_name not in sdata.shapes:
+        raise KeyError(f"SpatialData store is missing required vector shapes {shape_name!r}.")
     table = sdata.tables[table_name]
     master_ids = _table_instance_ids(table, table_name=table_name)
+    cell_shapes = sdata.shapes[shape_name]
+    if shape_instance_key not in cell_shapes.columns:
+        raise KeyError(
+            f"Vector shapes {shape_name!r} are missing required ID column {shape_instance_key!r}."
+        )
+    vector_ids = pd.Index(
+        [_normalize_instance_id(value) for value in cell_shapes[shape_instance_key]],
+        name="instance_id",
+    )
+    if vector_ids.has_duplicates:
+        duplicated = vector_ids[vector_ids.duplicated()].unique().tolist()[:10]
+        raise ValueError(f"{shape_name}.{shape_instance_key} contains duplicate IDs: {duplicated}")
+    unknown_vector_ids = vector_ids.difference(master_ids)
+    if len(unknown_vector_ids):
+        raise ValueError(
+            f"{shape_name}.{shape_instance_key} contains IDs absent from {table_name}: "
+            f"{unknown_vector_ids.tolist()[:10]}"
+        )
+
     assignments = pd.Series(unassigned_label, index=master_ids, name="tumor_id", dtype="string")
     memberships: dict[str, list[str]] = {}
     query = polygon_query_func or _import_polygon_query()
+    SpatialData = _import_spatialdata_class()
+    vector_sdata = SpatialData(shapes={shape_name: cell_shapes})
 
     tumor_count = len(tumors.tumor_ids)
     for tumor_index, (tumor_id, polygon) in enumerate(
@@ -281,17 +323,28 @@ def assign_tumor_ids(
         started_at = perf_counter()
         try:
             queried = query(
-                sdata,
+                vector_sdata,
                 polygon=polygon,
                 target_coordinate_system=coordinate_system,
-                filter_table=True,
+                filter_table=False,
             )
         except AssertionError:
             queried = None
-        if queried is None or table_name not in queried.tables:
+        if queried is None or shape_name not in queried.shapes:
             selected = pd.Index([], dtype="object", name="instance_id")
         else:
-            selected = _table_instance_ids(queried.tables[table_name], table_name=table_name)
+            selected_shapes = queried.shapes[shape_name]
+            if shape_instance_key not in selected_shapes.columns:
+                raise KeyError(
+                    f"Queried shapes {shape_name!r} lost ID column {shape_instance_key!r}."
+                )
+            selected = pd.Index(
+                [
+                    _normalize_instance_id(value)
+                    for value in selected_shapes[shape_instance_key]
+                ],
+                name="instance_id",
+            )
         elapsed_seconds = perf_counter() - started_at
         if progress is not None:
             progress(
@@ -301,7 +354,8 @@ def assign_tumor_ids(
         unknown = selected.difference(master_ids)
         if len(unknown):
             raise ValueError(
-                f"polygon_query returned cells absent from {table_name}: {unknown.tolist()[:10]}"
+                f"polygon_query returned vector IDs absent from {table_name}: "
+                f"{unknown.tolist()[:10]}"
             )
         for instance_id in selected:
             memberships.setdefault(str(instance_id), []).append(tumor_id)

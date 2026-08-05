@@ -203,9 +203,24 @@ def test_metadata_free_annotation_geojson_uses_feature_names(monkeypatch, tmp_pa
         )
 
 
-def test_tumor_assignment_uses_instance_ids_and_rejects_overlaps():
+def test_tumor_assignment_uses_vector_cell_ids_and_rejects_overlaps(monkeypatch):
     master = DummyTable(np.ones((3, 1)), [1, 7, 20], ["DAPI"])
-    sdata = types.SimpleNamespace(tables={"agg_cell_labels": master})
+    master.obs["instance_id"] = [
+        "1_cell_labels_63da4c21",
+        "7_cell_labels_63da4c21",
+        "20_cell_labels_63da4c21",
+    ]
+    cell_boundaries = pd.DataFrame({"cell_ID": [1, 7, 20]})
+    sdata = types.SimpleNamespace(
+        tables={"agg_cell_labels": master},
+        shapes={"cell_boundaries": cell_boundaries},
+    )
+
+    class DummySpatialData:
+        def __init__(self, *, shapes):
+            self.shapes = shapes
+
+    monkeypatch.setattr(analysis_module, "_import_spatialdata_class", lambda: DummySpatialData)
     tumors = TumorGeoJSON(
         path=Path("tumors.geojson"),
         metadata={},
@@ -217,8 +232,10 @@ def test_tumor_assignment_uses_instance_ids_and_rejects_overlaps():
 
     def query(_sdata, *, polygon, **kwargs):
         ids = [1, 7] if polygon == "g1" else [20]
-        selected = DummyTable(np.ones((len(ids), 1)), ids, ["DAPI"])
-        return types.SimpleNamespace(tables={"agg_cell_labels": selected})
+        assert list(_sdata.shapes) == ["cell_boundaries"]
+        assert kwargs["filter_table"] is False
+        selected = pd.DataFrame({"cell_ID": ids})
+        return types.SimpleNamespace(shapes={"cell_boundaries": selected})
 
     progress_messages = []
     assignments, summary = assign_tumor_ids(
@@ -240,8 +257,8 @@ def test_tumor_assignment_uses_instance_ids_and_rejects_overlaps():
 
     def overlapping_query(_sdata, *, polygon, **kwargs):
         ids = [1, 7] if polygon == "g1" else [7, 20]
-        selected = DummyTable(np.ones((len(ids), 1)), ids, ["DAPI"])
-        return types.SimpleNamespace(tables={"agg_cell_labels": selected})
+        selected = pd.DataFrame({"cell_ID": ids})
+        return types.SimpleNamespace(shapes={"cell_boundaries": selected})
 
     with pytest.raises(ValueError, match="more than one tumor"):
         assign_tumor_ids(sdata, tumors, polygon_query_func=overlapping_query)
