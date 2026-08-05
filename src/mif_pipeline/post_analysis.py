@@ -8,6 +8,7 @@ back to a SpatialData store.
 from __future__ import annotations
 
 import json
+import re
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Callable, Mapping, Sequence
@@ -227,9 +228,23 @@ def read_tumor_geojson(
 def _table_instance_ids(table: Any, *, table_name: str) -> pd.Index:
     obs = table.obs
     if "instance_id" in obs.columns:
-        ids = pd.Index(obs["instance_id"].astype(str), name="instance_id")
+        raw_ids = obs["instance_id"]
     else:
-        ids = pd.Index(pd.Index(obs.index).astype(str), name="instance_id")
+        raw_ids = obs.index
+
+    def normalize(value: Any) -> str:
+        text = str(value).strip()
+        decorated = re.fullmatch(
+            r"(\d+)_(?:cell|nuclear|cytoplasm)_labels(?:_[A-Za-z0-9]+)?",
+            text,
+        )
+        if decorated is not None:
+            return str(int(decorated.group(1)))
+        if re.fullmatch(r"\d+", text):
+            return str(int(text))
+        return text
+
+    ids = pd.Index([normalize(value) for value in raw_ids], name="instance_id")
     if ids.has_duplicates:
         duplicated = ids[ids.duplicated()].unique().tolist()[:10]
         raise ValueError(f"{table_name} contains duplicate instance IDs: {duplicated}")
@@ -723,7 +738,7 @@ def build_slide_analysis(
     obs = obs.join(decode)
 
     composite_ids = pd.Index(
-        [f"{slide_id}:{instance_id}" for instance_id in master_ids],
+        [f"{slide_id}_{instance_id}" for instance_id in master_ids],
         name="cell_uid",
     )
     obs.index = composite_ids

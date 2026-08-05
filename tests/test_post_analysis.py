@@ -332,13 +332,13 @@ def test_slide_analysis_is_cell_aligned_and_cytoplasm_is_optional():
         ad_module=types.SimpleNamespace(AnnData=DummyAnnData),
     )
 
-    assert list(result.obs_names) == ["SLIDE-A:1", "SLIDE-A:7"]
+    assert list(result.obs_names) == ["SLIDE-A_1", "SLIDE-A_7"]
     assert "nucleus" in result.layers
     assert np.isnan(result.layers["nucleus"][1]).all()
     assert "cytoplasm" not in result.layers
     assert not result.obs["has_cytoplasm_aggregation"].any()
     assert list(result.obsm["nimbus"].index) == list(result.obs_names)
-    np.testing.assert_allclose(result.obsm["nimbus"].loc["SLIDE-A:1"], [0.2])
+    np.testing.assert_allclose(result.obsm["nimbus"].loc["SLIDE-A_1"], [0.2])
     assert list(result.obsm["alignment_zncc"].columns) == ["R1_DAPI", "R2_DAPI"]
 
 
@@ -346,7 +346,7 @@ def test_cohort_normalizes_optional_cytoplasm_and_modality_columns():
     def make(slide_id, *, cytoplasm, nimbus_column):
         obj = DummyAnnData(
             [[1.0]],
-            pd.DataFrame(index=[f"{slide_id}:1"]),
+            pd.DataFrame(index=[f"{slide_id}_1"]),
             pd.DataFrame(index=["A"]),
         )
         obj.layers["nucleus"] = np.array([[2.0]])
@@ -392,6 +392,30 @@ def test_join_diagnostics_reports_absent_optional_tables():
     assert diagnostics.loc["agg_nuclear_labels", "missing_master_cells"] == 1
     assert not diagnostics.loc["agg_cytoplasm_labels", "present"]
     assert diagnostics.loc["agg_cytoplasm_labels", "missing_master_cells"] == 2
+
+
+def test_harpy_decorated_observation_names_resolve_to_shared_label_ids():
+    cell = DummyTable([[1], [2]], [1, 7], ["A"])
+    nuclear = DummyTable([[3], [4]], [1, 7], ["A"])
+    cell.obs = cell.obs.drop(columns=["instance_id"])
+    nuclear.obs = nuclear.obs.drop(columns=["instance_id"])
+    cell.obs.index = pd.Index(["1_cell_labels_63da4c21", "7_cell_labels_63da4c21"])
+    nuclear.obs.index = pd.Index(
+        ["1_nuclear_labels_bdffbcf9", "7_nuclear_labels_bdffbcf9"]
+    )
+    sdata = types.SimpleNamespace(
+        tables={"agg_cell_labels": cell, "agg_nuclear_labels": nuclear}
+    )
+
+    diagnostics = table_join_diagnostics(sdata)
+    nuclear_frame = analysis_module.table_to_frame(
+        nuclear, table_name="agg_nuclear_labels"
+    )
+
+    assert list(nuclear_frame.index) == ["1", "7"]
+    assert diagnostics.loc["agg_nuclear_labels", "matched_master"] == 2
+    assert diagnostics.loc["agg_nuclear_labels", "missing_master_cells"] == 0
+    assert diagnostics.loc["agg_nuclear_labels", "extra_cells"] == 0
 
 
 def test_analysis_notebook_uses_read_only_helpers():

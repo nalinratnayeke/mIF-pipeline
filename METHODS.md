@@ -331,10 +331,11 @@ compared with a channel-specific non-winner distribution. One threshold set is e
 from tumor-assigned cells with complete finite decoding measurements. Passing round tuples map to
 the supplied codebook; an absent tuple is `UNK`, whereas a cell that fails any round is a no-call.
 
-The integrated cell table uses composite `slide_id:instance_id` observation names. Whole-cell
+The integrated cell table uses composite `slide_id_instance_id` observation names. Whole-cell
 intensity is stored in `X`, with nuclear and optional cytoplasm intensity in same-axis layers.
 Nimbus and ZNCC correlation retain their distinct channel axes as labeled `obsm` data frames. All
-tables are joined by explicit instance ID, unavailable measurements are `NaN`, and cohort spatial
+tables are joined by explicit instance ID after removing Harpy's region-specific observation-name
+suffixes, unavailable measurements are `NaN`, and cohort spatial
 coordinates remain slide-local even though their units are microns. The resulting H5AD and QC
 sidecars are separate derived artifacts; canonical SpatialData stores are not modified.
 

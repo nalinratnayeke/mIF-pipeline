@@ -217,7 +217,9 @@ are retained in provenance, and labels can be overridden with an ordered `tumor_
 Multi-tumor cell assignments are errors rather than last-polygon-wins updates.
 
 Guide calls use ordered exact aliases from `agg_nuclear_labels`, while `agg_cell_labels.instance_id`
-defines the master cell index for every join. The exported AnnData uses whole-cell intensities in
+defines the master cell index for every join. Harpy-decorated observation names such as
+`1_cell_labels_<suffix>` and `1_nuclear_labels_<suffix>` are normalized to their shared numeric
+label ID before comparison. The exported AnnData uses whole-cell intensities in
 `X`, nuclear and optional cytoplasm intensities in same-axis layers, native Nimbus features in
 `obsm["nimbus"]`, ZNCC correlation in `obsm["alignment_zncc"]`, and slide-local micron coordinates
 in `obsm["spatial"]`. If cytoplasm aggregation is absent it is not synthesized; mixed cohorts use
