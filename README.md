@@ -34,6 +34,7 @@ Active debugging notebooks live under [prototyping](/home/ratnayn/codex/mIF-pipe
 - [mif_pipeline_instanseg_nimbus_api_v1-fullslide.ipynb](/home/ratnayn/codex/mIF-pipeline/prototyping/mif_pipeline_instanseg_nimbus_api_v1-fullslide.ipynb)
 - [mif_pipeline_harpy_spatialdata_api_v1-Crop.ipynb](/home/ratnayn/codex/mIF-pipeline/prototyping/mif_pipeline_harpy_spatialdata_api_v1-Crop.ipynb)
 - [alignment_qc_zncc_validation.ipynb](prototyping/alignment_qc_zncc_validation.ipynb)
+- [tumor_annotation_perturbview_decode.ipynb](prototyping/tumor_annotation_perturbview_decode.ipynb)
 
 Reference implementations and external snapshots live under [Reference](/home/ratnayn/codex/mIF-pipeline/Reference).
 
@@ -201,6 +202,23 @@ Artifacts are written under the slide-local `alignment_qc/` directory, and only 
 labels, tables, shapes, and transformations are not rewritten. Install OpenCV in the SpatialData
 environment with `pip install -e '.[alignment-qc]'`. The read-only validation notebook uses the
 same production helpers and supports whole-slide and micron-coordinate zoom inspection.
+
+### Tumor annotation and PerturbView decoding
+
+Tumor annotation and combinatorial FISH decoding remain an interactive post-analysis workflow,
+not pipeline stages. Use the read-only
+[`tumor_annotation_perturbview_decode.ipynb`](prototyping/tumor_annotation_perturbview_decode.ipynb)
+after SpatialData assembly and alignment QC. It validates full-resolution pixel-coordinate tumor
+GeoJSON metadata, converts the polygons to global microns, and assigns cells through
+`polygon_query`. Multi-tumor cell assignments are errors rather than last-polygon-wins updates.
+
+Guide calls use ordered exact aliases from `agg_nuclear_labels`, while `agg_cell_labels.instance_id`
+defines the master cell index for every join. The exported AnnData uses whole-cell intensities in
+`X`, nuclear and optional cytoplasm intensities in same-axis layers, native Nimbus features in
+`obsm["nimbus"]`, ZNCC correlation in `obsm["alignment_zncc"]`, and slide-local micron coordinates
+in `obsm["spatial"]`. If cytoplasm aggregation is absent it is not synthesized; mixed cohorts use
+`NaN`, never zero, for slides without that measurement. The notebook writes separate H5AD, CSV,
+JSON, and figure artifacts and never writes derived elements back to canonical SpatialData.
 
 ## SpatialData
 

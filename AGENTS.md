@@ -62,6 +62,19 @@ These are now deliberate and should be preserved unless the user asks for a chan
 - Raster labels are the segmentation source of truth.
 - Shapes are optional derived artifacts.
 
+### Interactive post-analysis strategy
+
+- Tumor GeoJSON annotation and PerturbView-style guide decoding remain notebook workflows, not
+  pipeline stages.
+- Treat `agg_cell_labels.instance_id` as the master cell index and join nuclear, cytoplasm, Nimbus,
+  and alignment tables explicitly by instance ID.
+- Decode combinatorial FISH measurements from `agg_nuclear_labels` unless the user requests a
+  different compartment.
+- Keep Nimbus and alignment measurements on their native feature axes rather than padding them into
+  raw-intensity AnnData layers.
+- Export separate analysis artifacts; do not write derived tumor or decoding elements back to
+  canonical SpatialData stores by default.
+
 ### Nimbus strategy
 
 - `nimbus.multislide` is no longer supported in config.

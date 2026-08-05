@@ -315,6 +315,28 @@ stage lists, channel-map schemas, upstream artifacts, existing SpatialData eleme
 transformations are unchanged. The command runs only when requested, and force mode is scoped to
 alignment-QC-owned artifacts and its one table element.
 
+## Interactive Tumor and Guide Analysis
+
+Tumor segmentation metadata and combinatorial FISH guide calls are integrated after pipeline and
+alignment-QC completion in a read-only notebook workflow. Tumor GeoJSON features declare their
+source slide, full-resolution pixel canvas, axis order, and physical pixel size. A validated
+geometry copy is scaled into global microns before SpatialData polygon queries. Memberships are
+collected across every tumor before assignment so a cell returned by multiple polygons is reported
+as an error rather than overwritten.
+
+Guide decoding uses nuclear raster-aggregation intensities. Within each round, scaled bit channels
+are ranked per cell, the winner-to-runner-up ratio is calculated, and the winning raw signal is
+compared with a channel-specific non-winner distribution. One threshold set is estimated per slide
+from tumor-assigned cells with complete finite decoding measurements. Passing round tuples map to
+the supplied codebook; an absent tuple is `UNK`, whereas a cell that fails any round is a no-call.
+
+The integrated cell table uses composite `slide_id:instance_id` observation names. Whole-cell
+intensity is stored in `X`, with nuclear and optional cytoplasm intensity in same-axis layers.
+Nimbus and ZNCC correlation retain their distinct channel axes as labeled `obsm` data frames. All
+tables are joined by explicit instance ID, unavailable measurements are `NaN`, and cohort spatial
+coordinates remain slide-local even though their units are microns. The resulting H5AD and QC
+sidecars are separate derived artifacts; canonical SpatialData stores are not modified.
+
 ## Cluster Execution Considerations
 
 ### One job per slide
