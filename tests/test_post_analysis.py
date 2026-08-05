@@ -113,17 +113,10 @@ def _geojson_payload():
                 },
             }
         ],
-        "mif_pipeline": {
-            "slide_id": "SLIDE-A",
-            "coordinate_units": "intrinsic_full_resolution_pixels",
-            "axis_order": "x_y",
-            "canvas_shape_yx": [100, 200],
-            "pixel_size_um": 0.5,
-        },
     }
 
 
-def test_tumor_geojson_validates_metadata_and_scales_to_microns(monkeypatch, tmp_path: Path):
+def test_tumor_geojson_uses_loaded_slide_pixel_scale(monkeypatch, tmp_path: Path):
     monkeypatch.setattr(
         analysis_module,
         "_import_shapely",
@@ -147,16 +140,14 @@ def test_tumor_geojson_validates_metadata_and_scales_to_microns(monkeypatch, tmp
     assert tumors.tumor_ids == ("tumor_001",)
     assert tumors.source_feature_ids == ("tumor_001",)
     assert tumors.global_geometries[0].scale_factor == (0.5, 0.5, (0.0, 0.0))
+    assert tumors.metadata["metadata_source"] == "loaded_slide_and_raw_pixel_assumption"
 
-    payload = _geojson_payload()
-    payload["mif_pipeline"]["canvas_shape_yx"] = [101, 200]
-    path.write_text(json.dumps(payload), encoding="utf-8")
-    with pytest.raises(ValueError, match="does not match store canvas"):
+    with pytest.raises(ValueError, match="fall outside"):
         read_tumor_geojson(
             path,
             expected_slide_id="SLIDE-A",
             expected_pixel_size_um=0.5,
-            expected_canvas_shape_yx=(100, 200),
+            expected_canvas_shape_yx=(5, 5),
         )
 
 
@@ -172,7 +163,6 @@ def test_metadata_free_annotation_geojson_uses_feature_names(monkeypatch, tmp_pa
         ),
     )
     payload = _geojson_payload()
-    payload.pop("mif_pipeline")
     payload["features"][0]["id"] = "annotation-uuid"
     payload["features"][0]["properties"] = {
         "objectType": "annotation",
@@ -181,24 +171,15 @@ def test_metadata_free_annotation_geojson_uses_feature_names(monkeypatch, tmp_pa
     path = tmp_path / "SLIDE-A.geojson"
     path.write_text(json.dumps(payload), encoding="utf-8")
 
-    with pytest.raises(ValueError, match="allow_metadata_free=True"):
-        read_tumor_geojson(
-            path,
-            expected_slide_id="SLIDE-A",
-            expected_pixel_size_um=0.5,
-            expected_canvas_shape_yx=(100, 200),
-        )
-
     tumors = read_tumor_geojson(
         path,
         expected_slide_id="SLIDE-A",
         expected_pixel_size_um=0.5,
         expected_canvas_shape_yx=(100, 200),
-        allow_metadata_free=True,
     )
     assert tumors.tumor_ids == ("C2_A_NH",)
     assert tumors.source_feature_ids == ("annotation-uuid",)
-    assert tumors.metadata["metadata_source"] == "explicit_notebook_inputs_and_polygon_bounds"
+    assert tumors.metadata["metadata_source"] == "loaded_slide_and_raw_pixel_assumption"
     assert tumors.metadata["tumor_id_source"] == "feature_properties.name"
 
     named = read_tumor_geojson(
@@ -206,7 +187,6 @@ def test_metadata_free_annotation_geojson_uses_feature_names(monkeypatch, tmp_pa
         expected_slide_id="SLIDE-A",
         expected_pixel_size_um=0.5,
         expected_canvas_shape_yx=(100, 200),
-        allow_metadata_free=True,
         tumor_id_overrides=["tumor_left"],
     )
     assert named.tumor_ids == ("tumor_left",)
@@ -214,13 +194,12 @@ def test_metadata_free_annotation_geojson_uses_feature_names(monkeypatch, tmp_pa
 
     payload["features"][0]["properties"] = {"objectType": "annotation"}
     path.write_text(json.dumps(payload), encoding="utf-8")
-    with pytest.raises(ValueError, match="properties.name"):
+    with pytest.raises(ValueError, match="properties.name or properties.tumor_id"):
         read_tumor_geojson(
             path,
             expected_slide_id="SLIDE-A",
             expected_pixel_size_um=0.5,
             expected_canvas_shape_yx=(100, 200),
-            allow_metadata_free=True,
         )
 
 

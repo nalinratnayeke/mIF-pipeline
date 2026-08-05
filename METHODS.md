@@ -317,12 +317,11 @@ alignment-QC-owned artifacts and its one table element.
 
 ## Interactive Tumor and Guide Analysis
 
-Tumor segmentation metadata and combinatorial FISH guide calls are integrated after pipeline and
-alignment-QC completion in a read-only notebook workflow. Pipeline-authored tumor GeoJSONs declare
-their source slide, full-resolution pixel canvas, axis order, and physical pixel size. Named
-annotation exports without that metadata are accepted only through an explicit notebook setting;
-their filename, unique `properties.name` values, and polygon bounds are checked against the loaded
-canonical slide. A validated geometry copy is scaled into global microns before SpatialData polygon
+Tumor annotations and combinatorial FISH guide calls are integrated after pipeline and alignment-QC
+completion in a read-only notebook workflow. GeoJSON coordinates are always interpreted as
+full-resolution `(x, y)` pixels. Physical pixel size and canvas dimensions come from the loaded
+canonical slide; top-level GeoJSON metadata is not interpreted. Named polygon bounds are checked
+against that canvas, then a geometry copy is scaled into global microns before SpatialData polygon
 queries. Memberships are collected across every tumor before assignment so a cell returned by
 multiple polygons is reported as an error rather than overwritten.
 
