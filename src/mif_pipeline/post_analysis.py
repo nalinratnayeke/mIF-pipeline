@@ -282,7 +282,7 @@ def assign_tumor_ids(
     """Assign master cells by querying vector boundaries and joining their instance IDs."""
 
     shape_name = "cell_boundaries"
-    shape_instance_key = "cell_ID"
+    shape_instance_key = "cell_id"
     if table_name not in sdata.tables:
         raise KeyError(f"SpatialData store is missing required table {table_name!r}.")
     if shape_name not in sdata.shapes:

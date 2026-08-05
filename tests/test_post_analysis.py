@@ -210,7 +210,7 @@ def test_tumor_assignment_uses_vector_cell_ids_and_rejects_overlaps(monkeypatch)
         "7_cell_labels_63da4c21",
         "20_cell_labels_63da4c21",
     ]
-    cell_boundaries = pd.DataFrame({"cell_ID": [1, 7, 20]})
+    cell_boundaries = pd.DataFrame({"cell_id": [1, 7, 20]})
     sdata = types.SimpleNamespace(
         tables={"agg_cell_labels": master},
         shapes={"cell_boundaries": cell_boundaries},
@@ -234,7 +234,7 @@ def test_tumor_assignment_uses_vector_cell_ids_and_rejects_overlaps(monkeypatch)
         ids = [1, 7] if polygon == "g1" else [20]
         assert list(_sdata.shapes) == ["cell_boundaries"]
         assert kwargs["filter_table"] is False
-        selected = pd.DataFrame({"cell_ID": ids})
+        selected = pd.DataFrame({"cell_id": ids})
         return types.SimpleNamespace(shapes={"cell_boundaries": selected})
 
     progress_messages = []
@@ -257,7 +257,7 @@ def test_tumor_assignment_uses_vector_cell_ids_and_rejects_overlaps(monkeypatch)
 
     def overlapping_query(_sdata, *, polygon, **kwargs):
         ids = [1, 7] if polygon == "g1" else [7, 20]
-        selected = pd.DataFrame({"cell_ID": ids})
+        selected = pd.DataFrame({"cell_id": ids})
         return types.SimpleNamespace(shapes={"cell_boundaries": selected})
 
     with pytest.raises(ValueError, match="more than one tumor"):

@@ -322,7 +322,7 @@ completion in a read-only notebook workflow. GeoJSON coordinates are always inte
 full-resolution `(x, y)` pixels. Physical pixel size and canvas dimensions come from the loaded
 canonical slide; top-level GeoJSON metadata is not interpreted. Named polygon bounds are checked
 against that canvas, then a geometry copy is scaled into global microns before querying a temporary
-SpatialData object containing only the vector `cell_boundaries`. Returned `cell_ID` values are
+SpatialData object containing only the vector `cell_boundaries`. Returned `cell_id` values are
 normalized and joined explicitly to the decorated `agg_cell_labels` IDs. Memberships are collected
 across every tumor before assignment so a cell returned by
 multiple polygons is reported as an error rather than overwritten.
