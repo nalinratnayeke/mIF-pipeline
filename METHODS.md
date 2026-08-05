@@ -323,15 +323,16 @@ full-resolution `(x, y)` pixels. Physical pixel size and canvas dimensions come 
 canonical slide; top-level GeoJSON metadata is not interpreted. Named polygon bounds are checked
 against that canvas, then a geometry copy is scaled into global microns before querying a temporary
 SpatialData object containing only the vector `cell_boundaries`. Returned `cell_id` values are
-normalized and joined explicitly to the decorated `agg_cell_labels` IDs. Memberships are collected
-across every tumor before assignment so a cell returned by
+normalized and joined explicitly to the decorated `agg_cell_labels` IDs. Each tumor's IDs are
+assigned as one vectorized batch after checking existing assignments, so a cell returned by
 multiple polygons is reported as an error rather than overwritten.
 
 Guide decoding uses nuclear raster-aggregation intensities. Within each round, scaled bit channels
 are ranked per cell, the winner-to-runner-up ratio is calculated, and the winning raw signal is
 compared with a channel-specific non-winner distribution. One threshold set is estimated per slide
 from tumor-assigned cells with complete finite decoding measurements. Passing round tuples map to
-the supplied codebook; an absent tuple is `UNK`, whereas a cell that fails any round is a no-call.
+the supplied codebook through a lookup over the small set of unique observed combinations; an
+absent tuple is `UNK`, whereas a cell that fails any round is a no-call.
 
 The integrated cell table uses composite `slide_id_instance_id` observation names. Whole-cell
 intensity is stored in `X`, with nuclear and optional cytoplasm intensity in same-axis layers.
@@ -339,7 +340,8 @@ Nimbus and ZNCC correlation retain their distinct channel axes as labeled `obsm`
 tables are joined by explicit instance ID after removing Harpy's region-specific observation-name
 suffixes, unavailable measurements are `NaN`, and cohort spatial
 coordinates remain slide-local even though their units are microns. The resulting H5AD and QC
-sidecars are separate derived artifacts; canonical SpatialData stores are not modified.
+sidecars are separate derived artifacts; canonical SpatialData stores are not modified. The full
+per-cell observation CSV is opt-in because the same annotations are already stored in the H5AD.
 
 ## Cluster Execution Considerations
 

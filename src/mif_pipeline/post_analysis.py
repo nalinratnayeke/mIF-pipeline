@@ -255,7 +255,9 @@ def _normalize_instance_id(value: Any) -> str:
     return text
 
 
-def _table_instance_ids(table: Any, *, table_name: str) -> pd.Index:
+def table_instance_ids(table: Any, *, table_name: str) -> pd.Index:
+    """Return normalized instance IDs without materializing a table matrix."""
+
     obs = table.obs
     if "instance_id" in obs.columns:
         raw_ids = obs["instance_id"]
@@ -288,7 +290,7 @@ def assign_tumor_ids(
     if shape_name not in sdata.shapes:
         raise KeyError(f"SpatialData store is missing required vector shapes {shape_name!r}.")
     table = sdata.tables[table_name]
-    master_ids = _table_instance_ids(table, table_name=table_name)
+    master_ids = table_instance_ids(table, table_name=table_name)
     cell_shapes = sdata.shapes[shape_name]
     if shape_instance_key not in cell_shapes.columns:
         raise KeyError(
@@ -493,8 +495,11 @@ def decode_perturbview(
     if float(ratio_min) < 1:
         raise ValueError("ratio_min must be at least 1.")
 
-    frame = nuclear_intensities.copy()
-    frame.index = pd.Index(frame.index.astype(str), name="instance_id")
+    frame = nuclear_intensities
+    normalized_index = pd.Index(frame.index.astype(str), name="instance_id")
+    if not frame.index.equals(normalized_index) or frame.index.name != "instance_id":
+        frame = frame.copy(deep=False)
+        frame.index = normalized_index
     if frame.index.has_duplicates:
         raise ValueError("nuclear_intensities index must contain unique instance IDs.")
     ordered_rounds = [str(value) for value in round_channels]
@@ -550,6 +555,9 @@ def decode_perturbview(
     thresholds: dict[str, dict[str, float]] = {}
     scaling_values: dict[str, dict[str, float]] = {}
     eligible_index = frame.index[eligible]
+    top_indices_by_round: list[np.ndarray] = []
+    pass_by_round: list[np.ndarray] = []
+    quality_by_round: list[np.ndarray] = []
 
     for round_name in ordered_rounds:
         channels = ordered_channels[round_name]
@@ -568,15 +576,21 @@ def decode_perturbview(
             basis = nonwinners if nonwinners.size else raw[:, channel_index]
             channel_thresholds[channel] = float(np.percentile(basis, null_quantile))
         winner_values = raw[np.arange(len(raw)), top_indices]
-        winner_thresholds = np.asarray(
-            [channel_thresholds[channels[index]] for index in top_indices], dtype=float
+        threshold_values = np.asarray(
+            [channel_thresholds[channel] for channel in channels], dtype=float
         )
+        winner_thresholds = threshold_values[top_indices]
         folds = winner_values / (winner_thresholds + EPS)
         pass_top = winner_values >= winner_thresholds
         pass_ratio = ratios >= ratio_min
+        round_pass = pass_top & pass_ratio
+        round_quality = _ratio_quality(ratios)
+        top_indices_by_round.append(top_indices)
+        pass_by_round.append(round_pass)
+        quality_by_round.append(round_quality)
 
         prefix = f"decode_{round_name}"
-        calls[f"{prefix}_top_idx"] = pd.array([pd.NA] * len(calls), dtype="Int32")
+        calls[f"{prefix}_top_idx"] = pd.Series(pd.NA, index=calls.index, dtype="Int32")
         for suffix in ("ratio", "raw_top", "top_threshold", "top_fold", "quality"):
             calls[f"{prefix}_{suffix}"] = np.nan
         for suffix in ("pass_top", "pass_ratio", "pass"):
@@ -588,8 +602,8 @@ def decode_perturbview(
         calls.loc[eligible_index, f"{prefix}_top_fold"] = folds
         calls.loc[eligible_index, f"{prefix}_pass_top"] = pass_top
         calls.loc[eligible_index, f"{prefix}_pass_ratio"] = pass_ratio
-        calls.loc[eligible_index, f"{prefix}_pass"] = pass_top & pass_ratio
-        calls.loc[eligible_index, f"{prefix}_quality"] = _ratio_quality(ratios)
+        calls.loc[eligible_index, f"{prefix}_pass"] = round_pass
+        calls.loc[eligible_index, f"{prefix}_quality"] = round_quality
         thresholds[round_name] = channel_thresholds
         scaling_values[round_name] = {
             channel: float(value) for channel, value in zip(channels, scales)
@@ -600,33 +614,34 @@ def decode_perturbview(
     calls["decode_guide_call"] = no_call_label
     calls["decode_call_confidence"] = 0.0
 
-    tuples: list[tuple[int, ...]] = []
-    for instance_id in eligible_index:
-        values = tuple(
-            int(calls.at[instance_id, f"decode_{round_name}_top_idx"])
-            for round_name in ordered_rounds
-        )
-        tuples.append(values)
-    round_labels = [
-        "_".join(f"{name}C{index + 1}" for name, index in zip(ordered_rounds, values))
-        for values in tuples
-    ]
-    decoded_bits = [_bitstring(values, bits_per_round=bits_per_round) for values in tuples]
-    all_pass = np.logical_and.reduce(
+    top_matrix = np.column_stack(top_indices_by_round)
+    unique_combinations, inverse = np.unique(top_matrix, axis=0, return_inverse=True)
+    unique_tuples = [tuple(int(value) for value in row) for row in unique_combinations]
+    round_label_lookup = np.asarray(
         [
-            calls.loc[eligible_index, f"decode_{round_name}_pass"].to_numpy(dtype=bool)
-            for round_name in ordered_rounds
-        ]
+            "_".join(
+                f"{name}C{index + 1}"
+                for name, index in zip(ordered_rounds, values)
+            )
+            for values in unique_tuples
+        ],
+        dtype=object,
     )
-    mapped = np.asarray([codebook.get(values, unknown_label) for values in tuples], dtype=object)
+    decoded_bits_lookup = np.asarray(
+        [_bitstring(values, bits_per_round=bits_per_round) for values in unique_tuples],
+        dtype=object,
+    )
+    guide_lookup = np.asarray(
+        [codebook.get(values, unknown_label) for values in unique_tuples],
+        dtype=object,
+    )
+    round_labels = round_label_lookup[inverse]
+    decoded_bits = decoded_bits_lookup[inverse]
+    all_pass = np.column_stack(pass_by_round).all(axis=1)
+    mapped = guide_lookup[inverse]
     guide_calls = np.where(all_pass, mapped, no_call_label)
-    qualities = np.vstack(
-        [
-            calls.loc[eligible_index, f"decode_{round_name}_quality"].to_numpy(dtype=float)
-            for round_name in ordered_rounds
-        ]
-    )
-    confidence = np.exp(np.mean(np.log(np.clip(qualities, 1e-12, 1.0)), axis=0))
+    qualities = np.column_stack(quality_by_round)
+    confidence = np.exp(np.mean(np.log(np.clip(qualities, 1e-12, 1.0)), axis=1))
     confidence = np.where(guide_calls != no_call_label, confidence, 0.0)
     calls.loc[eligible_index, "decode_round_label"] = round_labels
     calls.loc[eligible_index, "decode_decoded_bits"] = decoded_bits
@@ -678,14 +693,10 @@ def decode_perturbview(
 def table_to_frame(table: Any, *, table_name: str, layer: str | None = None) -> pd.DataFrame:
     """Return a table matrix indexed by its explicit string instance IDs."""
 
-    ids = _table_instance_ids(table, table_name=table_name)
+    ids = table_instance_ids(table, table_name=table_name)
     columns = pd.Index([str(value) for value in table.var_names], name="channel_alias")
     if layer is None:
-        if hasattr(table, "to_df"):
-            raw = table.to_df()
-            values = raw.to_numpy()
-        else:
-            values = table.X
+        values = table.X
     else:
         if layer not in table.layers:
             raise KeyError(f"{table_name} is missing layer {layer!r}.")
@@ -698,7 +709,7 @@ def table_to_frame(table: Any, *, table_name: str, layer: str | None = None) -> 
             f"{table_name} matrix shape {values.shape} does not match "
             f"({len(ids)}, {len(columns)})."
         )
-    return pd.DataFrame(values, index=ids, columns=columns)
+    return pd.DataFrame(values, index=ids, columns=columns, copy=False)
 
 
 def table_join_diagnostics(
@@ -716,7 +727,7 @@ def table_join_diagnostics(
 
     if master_table not in sdata.tables:
         raise KeyError(f"SpatialData store is missing master table {master_table!r}.")
-    master_ids = _table_instance_ids(sdata.tables[master_table], table_name=master_table)
+    master_ids = table_instance_ids(sdata.tables[master_table], table_name=master_table)
     rows = [
         {
             "table": master_table,
@@ -743,7 +754,7 @@ def table_join_diagnostics(
             )
             continue
         table = sdata.tables[table_name]
-        ids = _table_instance_ids(table, table_name=table_name)
+        ids = table_instance_ids(table, table_name=table_name)
         rows.append(
             {
                 "table": table_name,
@@ -783,6 +794,7 @@ def build_slide_analysis(
     slide_id: str,
     tumor_ids: pd.Series,
     decode_result: DecodeResult,
+    nuclear_intensities: pd.DataFrame | None = None,
     sample_metadata: Mapping[str, Any] | None = None,
     ad_module: Any | None = None,
 ) -> Any:
@@ -793,7 +805,7 @@ def build_slide_analysis(
     if missing:
         raise KeyError(f"SpatialData store is missing required analysis tables: {missing}")
     cell_table = sdata.tables["agg_cell_labels"]
-    master_ids = _table_instance_ids(cell_table, table_name="agg_cell_labels")
+    master_ids = table_instance_ids(cell_table, table_name="agg_cell_labels")
     channels = pd.Index([str(value) for value in cell_table.var_names], name="channel_alias")
     cell_values = table_to_frame(cell_table, table_name="agg_cell_labels").reindex(
         index=master_ids, columns=channels
@@ -812,10 +824,7 @@ def build_slide_analysis(
         raise ValueError(f"Decode columns already exist in master observations: {duplicate_decode_columns}")
     obs = obs.join(decode)
 
-    composite_ids = pd.Index(
-        [f"{slide_id}_{instance_id}" for instance_id in master_ids],
-        name="cell_uid",
-    )
+    composite_ids = pd.Index(str(slide_id) + "_" + master_ids.astype(str), name="cell_uid")
     obs.index = composite_ids
     var = cell_table.var.copy().reindex(channels)
     var.index = channels
@@ -827,12 +836,19 @@ def build_slide_analysis(
         var=var,
     )
 
-    nuclear = _reindex_intensity_table(
-        sdata.tables["agg_nuclear_labels"],
-        table_name="agg_nuclear_labels",
-        master_ids=master_ids,
-        master_channels=channels,
-    )
+    if nuclear_intensities is None:
+        nuclear = _reindex_intensity_table(
+            sdata.tables["agg_nuclear_labels"],
+            table_name="agg_nuclear_labels",
+            master_ids=master_ids,
+            master_channels=channels,
+        )
+    else:
+        if not isinstance(nuclear_intensities, pd.DataFrame):
+            raise TypeError("nuclear_intensities must be a pandas DataFrame when provided.")
+        nuclear = nuclear_intensities
+        if not nuclear.index.equals(master_ids) or not nuclear.columns.equals(channels):
+            nuclear = nuclear.reindex(index=master_ids, columns=channels)
     analysis.layers["nucleus"] = nuclear.to_numpy(dtype=np.float32)
     analysis.obs["has_nuclear_aggregation"] = nuclear.notna().any(axis=1).to_numpy()
 
@@ -911,9 +927,10 @@ def _stable_union(sequences: Sequence[Sequence[str]]) -> list[str]:
 def concat_slide_analyses(
     slide_analyses: Mapping[str, Any],
     *,
+    copy_inputs: bool = False,
     ad_module: Any | None = None,
 ) -> Any:
-    """Concatenate validated slide analyses while preserving modality-specific axes."""
+    """Concatenate slide analyses, normalizing inputs in place unless copying is requested."""
 
     if not slide_analyses:
         raise ValueError("slide_analyses must contain at least one slide.")
@@ -922,10 +939,12 @@ def concat_slide_analyses(
         str(slide_id): bool("cytoplasm" in value.layers)
         for slide_id, value in slide_analyses.items()
     }
-    prepared = {str(slide_id): value.copy() for slide_id, value in slide_analyses.items()}
-    all_obs_names = pd.Index(
-        [str(name) for value in prepared.values() for name in value.obs_names]
-    )
+    prepared = {
+        str(slide_id): value.copy() if copy_inputs else value
+        for slide_id, value in slide_analyses.items()
+    }
+    obs_indexes = [pd.Index(value.obs_names.astype(str)) for value in prepared.values()]
+    all_obs_names = obs_indexes[0].append(obs_indexes[1:])
     if all_obs_names.has_duplicates:
         duplicates = all_obs_names[all_obs_names.duplicated()].unique().tolist()[:10]
         raise ValueError(f"Cohort cell IDs are not unique: {duplicates}")
@@ -948,7 +967,10 @@ def concat_slide_analyses(
         if columns:
             for value in prepared.values():
                 if key in value.obsm:
-                    block = value.obsm[key].copy().reindex(columns=columns)
+                    block = value.obsm[key]
+                    if list(block.columns) == columns:
+                        continue
+                    block = block.reindex(columns=columns)
                 else:
                     block = pd.DataFrame(np.nan, index=value.obs_names, columns=columns)
                 block.index = value.obs_names
@@ -970,6 +992,7 @@ def concat_slide_analyses(
         "nimbus_columns": modality_columns["nimbus"],
         "alignment_columns": modality_columns["alignment_zncc"],
         "alignment_metric": "zncc_correlation",
+        "input_objects_copied": bool(copy_inputs),
         "missing_measurements_are_nan": True,
         "spatial_coordinates_are_slide_local": True,
     }
@@ -998,6 +1021,8 @@ def export_slide_analysis(
     source_store: str | Path,
     tumor_geojson: TumorGeoJSON,
     provenance: Mapping[str, Any] | None = None,
+    write_cell_annotations_csv: bool = False,
+    progress: Callable[[str], None] | None = None,
 ) -> dict[str, str]:
     """Write derived analysis files without touching the source SpatialData store."""
 
@@ -1005,7 +1030,6 @@ def export_slide_analysis(
     slide_dir.mkdir(parents=True, exist_ok=True)
     paths = {
         "h5ad": slide_dir / f"{slide_id}_cell_analysis.h5ad",
-        "cell_annotations": slide_dir / "cell_annotations.csv",
         "tumor_summary": slide_dir / "tumor_summary.csv",
         "decode_funnel": slide_dir / "decode_funnel.csv",
         "guide_counts": slide_dir / "guide_counts.csv",
@@ -1013,8 +1037,17 @@ def export_slide_analysis(
         "decode_settings": slide_dir / "decode_settings.json",
         "manifest": slide_dir / "analysis_manifest.json",
     }
+    if write_cell_annotations_csv:
+        paths["cell_annotations"] = slide_dir / "cell_annotations.csv"
+    if progress is not None:
+        progress(f"Writing AnnData: {paths['h5ad']}")
     analysis.write_h5ad(paths["h5ad"])
-    analysis.obs.to_csv(paths["cell_annotations"], index=True)
+    if write_cell_annotations_csv:
+        if progress is not None:
+            progress(f"Writing full observation CSV: {paths['cell_annotations']}")
+        analysis.obs.to_csv(paths["cell_annotations"], index=True)
+    if progress is not None:
+        progress("Writing slide-level summary files")
     tumor_summary.to_csv(paths["tumor_summary"], index=False)
     decode_result.funnel.to_csv(paths["decode_funnel"], index=True)
     decode_result.guide_counts.to_csv(paths["guide_counts"], index=False)
@@ -1061,6 +1094,7 @@ def export_slide_analysis(
         "alignment_columns": list(analysis.obsm["alignment_zncc"].columns)
         if "alignment_zncc" in analysis.obsm
         else [],
+        "cell_annotations_csv_written": bool(write_cell_annotations_csv),
         "outputs": {name: str(path) for name, path in paths.items() if name != "manifest"},
         "source_spatialdata_modified": False,
     }
@@ -1068,4 +1102,6 @@ def export_slide_analysis(
         json.dumps(_json_ready(manifest), indent=2),
         encoding="utf-8",
     )
+    if progress is not None:
+        progress(f"Finished writing slide outputs: {slide_dir}")
     return {name: str(path) for name, path in paths.items()}

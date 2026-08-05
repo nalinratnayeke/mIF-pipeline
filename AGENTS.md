@@ -72,6 +72,10 @@ These are now deliberate and should be preserved unless the user asks for a chan
   different compartment.
 - Keep Nimbus and alignment measurements on their native feature axes rather than padding them into
   raw-intensity AnnData layers.
+- Assign tumors through vector-only `cell_boundaries` queries and join `cell_id` explicitly to the
+  normalized master-table instance IDs; do not query the full raster-associated table.
+- Keep the H5AD as the authoritative per-cell export and leave the redundant full observation CSV
+  disabled by default for million-cell slides.
 - Export separate analysis artifacts; do not write derived tumor or decoding elements back to
   canonical SpatialData stores by default.
 

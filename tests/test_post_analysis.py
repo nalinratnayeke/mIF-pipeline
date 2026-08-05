@@ -18,6 +18,7 @@ from mif_pipeline.post_analysis import (
     build_slide_analysis,
     concat_slide_analyses,
     decode_perturbview,
+    export_slide_analysis,
     read_tumor_geojson,
     table_join_diagnostics,
 )
@@ -302,6 +303,8 @@ def test_codebook_and_decoder_handle_eligible_missing_and_unknown_cells(tmp_path
     calls = result.cell_calls
     assert calls.loc["1", "decode_guide_call"] == "guide_A"
     assert calls.loc["7", "decode_guide_call"] == "guide_B"
+    assert calls.loc["1", "decode_round_label"] == "R1C1_R2C2"
+    assert calls.loc["7", "decode_decoded_bits"] == "0110"
     assert not calls.loc["20", "decode_eligible"]
     assert calls.loc["20", "decode_guide_call"] == "None"
     assert calls.loc["50", "decode_missing_nucleus"]
@@ -356,17 +359,60 @@ def test_slide_analysis_is_cell_aligned_and_cytoplasm_is_optional():
         slide_id="SLIDE-A",
         tumor_ids=tumor_ids,
         decode_result=_decode_result([1, 7]),
+        nuclear_intensities=pd.DataFrame(
+            [[9.0, 8.0], [np.nan, np.nan]],
+            index=pd.Index(["1", "7"], name="instance_id"),
+            columns=pd.Index(["A", "B"], name="channel_alias"),
+        ),
         ad_module=types.SimpleNamespace(AnnData=DummyAnnData),
     )
 
     assert list(result.obs_names) == ["SLIDE-A_1", "SLIDE-A_7"]
     assert "nucleus" in result.layers
+    np.testing.assert_allclose(result.layers["nucleus"][0], [9.0, 8.0])
     assert np.isnan(result.layers["nucleus"][1]).all()
     assert "cytoplasm" not in result.layers
     assert not result.obs["has_cytoplasm_aggregation"].any()
     assert list(result.obsm["nimbus"].index) == list(result.obs_names)
     np.testing.assert_allclose(result.obsm["nimbus"].loc["SLIDE-A_1"], [0.2])
     assert list(result.obsm["alignment_zncc"].columns) == ["R1_DAPI", "R2_DAPI"]
+
+
+def test_export_skips_full_observation_csv_by_default(tmp_path: Path):
+    analysis = DummyAnnData(
+        [[1.0]],
+        pd.DataFrame(
+            {"tumor_id": ["T1"], "decode_guide_call": ["guide_A"]},
+            index=["SLIDE-A_1"],
+        ),
+        pd.DataFrame(index=["A"]),
+    )
+    tumors = TumorGeoJSON(
+        path=tmp_path / "tumors.geojson",
+        metadata={},
+        tumor_ids=("T1",),
+        pixel_geometries=("p1",),
+        global_geometries=("g1",),
+        source_feature_ids=("source-1",),
+    )
+    progress_messages = []
+
+    paths = export_slide_analysis(
+        analysis,
+        slide_id="SLIDE-A",
+        output_root=tmp_path,
+        tumor_summary=pd.DataFrame({"tumor_id": ["T1"], "n_cells": [1]}),
+        decode_result=_decode_result([1]),
+        source_store=tmp_path / "source.zarr",
+        tumor_geojson=tumors,
+        progress=progress_messages.append,
+    )
+
+    assert "cell_annotations" not in paths
+    assert not (tmp_path / "SLIDE-A" / "cell_annotations.csv").exists()
+    manifest = json.loads(Path(paths["manifest"]).read_text(encoding="utf-8"))
+    assert not manifest["cell_annotations_csv_written"]
+    assert progress_messages[0].startswith("Writing AnnData:")
 
 
 def test_cohort_normalizes_optional_cytoplasm_and_modality_columns():
