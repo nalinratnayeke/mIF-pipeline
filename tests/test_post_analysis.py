@@ -530,5 +530,12 @@ def test_analysis_notebook_uses_read_only_helpers():
     assert "decode_perturbview" in code
     assert "build_slide_analysis" in code
     assert "concat_slide_analyses" in code
+    assert "compact_decode_metrics" in code
+    assert "exclude_values={no_call_label}" in code
+    assert "for slide_id, record in records.items()" in code
+    assert "ZOOM_SLIDE" in code
+    assert 'column="tumor_id"' not in code
+    assert "Called-cell confidence" not in code
+    assert "Guide-frequency rank by tumor" not in code
     assert "write_element" not in code
     assert "delete_element_from_disk" not in code

@@ -35,6 +35,7 @@ Active debugging notebooks live under [prototyping](/home/ratnayn/codex/mIF-pipe
 - [mif_pipeline_harpy_spatialdata_api_v1-Crop.ipynb](/home/ratnayn/codex/mIF-pipeline/prototyping/mif_pipeline_harpy_spatialdata_api_v1-Crop.ipynb)
 - [alignment_qc_zncc_validation.ipynb](prototyping/alignment_qc_zncc_validation.ipynb)
 - [tumor_annotation_perturbview_decode.ipynb](prototyping/tumor_annotation_perturbview_decode.ipynb)
+- [cohort_tumor_decode_qc.ipynb](prototyping/cohort_tumor_decode_qc.ipynb)
 
 Reference implementations and external snapshots live under [Reference](/home/ratnayn/codex/mIF-pipeline/Reference).
 
@@ -232,6 +233,14 @@ already-materialized nuclear matrix is reused during AnnData construction. The
 H5AD is the authoritative per-cell artifact; the redundant full observation CSV is disabled by
 default through `WRITE_CELL_ANNOTATIONS_CSV = False`. Small summary CSVs, JSON, and figures are
 still written. The workflow never writes derived elements back to canonical SpatialData.
+
+After cohort export, use the read-only
+[`cohort_tumor_decode_qc.ipynb`](prototyping/cohort_tumor_decode_qc.ipynb) to inspect the cohort
+H5AD in backed mode. It recalculates slide-, round-, tumor-, and guide-level decoding summaries
+from the saved per-cell `decode_*` observation fields, and plots tumor-assigned cells and mapped
+guide calls in slide-local micron coordinates. Original tumor polygon geometries and each slide's
+fitted threshold/scaling dictionaries are not consolidated into the cohort H5AD; those remain in
+the source GeoJSON and slide-local post-analysis outputs.
 
 ## SpatialData
 
