@@ -238,7 +238,9 @@ optional cytoplasm intensities in same-axis layers, and native Nimbus features i
 ordered Nimbus subsets across every slide, rejects missing or nonfinite expected Nimbus values,
 and writes Nimbus as `layers["nimbus"]` on the intensity axis. Channels globally outside the Nimbus
 subset are zero-padded and identified by `var["nimbus_available"] == False`; the compact Nimbus
-`obsm` is not duplicated in the cohort. ZNCC correlation remains in `obsm["alignment_zncc"]`, and
+`obsm` is not duplicated in the cohort. Nimbus-table source order is retained separately in cohort
+metadata, while layer-facing `nimbus_columns` follows the shared intensity-axis order. ZNCC
+correlation remains in `obsm["alignment_zncc"]`, and
 slide-local micron coordinates remain in `obsm["spatial"]`. If cytoplasm aggregation is absent it is not synthesized; mixed cohorts use
 `NaN`, never zero, for slides without that measurement. Decoding derives the channel positions used
 in each round directly from the codebook; unused positions remain in raw diagnostics but cannot

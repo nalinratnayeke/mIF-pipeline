@@ -640,6 +640,31 @@ def test_cohort_rejects_inconsistent_intensity_or_nimbus_channels():
         )
 
 
+def test_cohort_records_nimbus_layer_columns_in_intensity_order():
+    obj = DummyAnnData(
+        [[1.0, 2.0, 3.0]],
+        pd.DataFrame(index=["S1_1"]),
+        pd.DataFrame(index=["A", "B", "C"]),
+    )
+    obj.obsm["nimbus"] = pd.DataFrame(
+        [[4.0, 5.0]], index=obj.obs_names, columns=["B", "A"]
+    )
+    captured = {}
+
+    def fake_concat(values, **kwargs):
+        captured["value"] = values[0]
+        return types.SimpleNamespace(uns={})
+
+    cohort = concat_slide_analyses(
+        {"S1": obj},
+        ad_module=types.SimpleNamespace(concat=fake_concat),
+    )
+
+    np.testing.assert_allclose(captured["value"].layers["nimbus"], [[5.0, 4.0, 0.0]])
+    assert cohort.uns["post_analysis_cohort"]["nimbus_columns"] == ["A", "B"]
+    assert cohort.uns["post_analysis_cohort"]["nimbus_source_columns"] == ["B", "A"]
+
+
 def test_join_diagnostics_reports_absent_optional_tables():
     cell = DummyTable([[1], [2]], [1, 7], ["A"])
     nuclear = DummyTable([[3]], [1], ["A"])

@@ -1239,6 +1239,9 @@ def concat_slide_analyses(
         del value.obsm["nimbus"]
 
     assert nimbus_columns is not None
+    nimbus_layer_columns = [
+        column for column in intensity_columns if column in set(nimbus_columns)
+    ]
     tissue_artifact_available = {
         str(slide_id): "tissue_artifact" in value.obs.columns
         for slide_id, value in prepared.items()
@@ -1299,7 +1302,8 @@ def concat_slide_analyses(
         "cytoplasm_available_by_slide": cytoplasm_available,
         "tissue_artifact_available_by_slide": tissue_artifact_available,
         "intensity_columns": intensity_columns,
-        "nimbus_columns": nimbus_columns,
+        "nimbus_columns": nimbus_layer_columns,
+        "nimbus_source_columns": nimbus_columns,
         "nimbus_storage": "layers['nimbus']",
         "nimbus_padding_value": 0.0,
         "nimbus_padding_applies_only_outside_configured_subset": True,
