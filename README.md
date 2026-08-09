@@ -219,13 +219,27 @@ canonical canvas and have a unique `properties.name` or `properties.tumor_id`. S
 are retained in provenance, and labels can be overridden with an ordered `tumor_ids` list.
 Multi-tumor cell assignments are errors rather than last-polygon-wins updates.
 
+The same notebook optionally accepts one tissue-artifact GeoJSON per slide for folds, blurry areas,
+and other regions that should remain traceable during downstream analysis. Set the slide's
+`tissue_artifact_geojson` to `None` to skip annotation. All polygon features in a supplied file
+are combined into the binary per-cell `obs["tissue_artifact"]` annotation: cells whose vectorized
+boundary intersects any artifact polygon are `1`, and all other master cells are `0`. Overlapping
+artifact polygons are allowed and still produce a single binary flag. This annotation is carried
+into the per-slide and cohort H5AD files but does not filter cells or alter guide decoding. In a
+cohort mixing annotated and unannotated slides, unannotated cells are `NaN`, not `0`, so lack of
+review is not mistaken for reviewed tissue without artifacts.
+
 Guide calls use ordered exact aliases from `agg_nuclear_labels`, while `agg_cell_labels.instance_id`
 defines the master cell index for every join. Harpy-decorated observation names such as
 `1_cell_labels_<suffix>` and `1_nuclear_labels_<suffix>` are normalized to their shared numeric
-label ID before comparison. The exported AnnData uses whole-cell intensities in
-`X`, nuclear and optional cytoplasm intensities in same-axis layers, native Nimbus features in
-`obsm["nimbus"]`, ZNCC correlation in `obsm["alignment_zncc"]`, and slide-local micron coordinates
-in `obsm["spatial"]`. If cytoplasm aggregation is absent it is not synthesized; mixed cohorts use
+label ID before comparison. Per-slide AnnData uses whole-cell intensities in `X`, nuclear and
+optional cytoplasm intensities in same-axis layers, and native Nimbus features in
+`obsm["nimbus"]`. Cohort construction requires identical ordered intensity axes and identical
+ordered Nimbus subsets across every slide, rejects missing or nonfinite expected Nimbus values,
+and writes Nimbus as `layers["nimbus"]` on the intensity axis. Channels globally outside the Nimbus
+subset are zero-padded and identified by `var["nimbus_available"] == False`; the compact Nimbus
+`obsm` is not duplicated in the cohort. ZNCC correlation remains in `obsm["alignment_zncc"]`, and
+slide-local micron coordinates remain in `obsm["spatial"]`. If cytoplasm aggregation is absent it is not synthesized; mixed cohorts use
 `NaN`, never zero, for slides without that measurement. Decoding derives the channel positions used
 in each round directly from the codebook; unused positions remain in raw diagnostics but cannot
 participate as the winner or runner-up. It uses vectorized round-combination lookups, and the
@@ -238,7 +252,9 @@ After cohort export, use the read-only
 [`cohort_tumor_decode_qc.ipynb`](prototyping/cohort_tumor_decode_qc.ipynb) to inspect the cohort
 H5AD in backed mode. It recalculates slide-, round-, tumor-, and guide-level decoding summaries
 from the saved per-cell `decode_*` observation fields, and plots tumor-assigned cells and mapped
-guide calls in slide-local micron coordinates. Original tumor polygon geometries and each slide's
+guide calls in slide-local micron coordinates. It also validates the persisted Nimbus layer in
+row chunks, requiring finite expected Nimbus values and exact zeros only in padded channels.
+Original tumor polygon geometries and each slide's
 fitted threshold/scaling dictionaries are not consolidated into the cohort H5AD; those remain in
 the source GeoJSON and slide-local post-analysis outputs.
 

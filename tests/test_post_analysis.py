@@ -12,13 +12,16 @@ import pytest
 import mif_pipeline.post_analysis as analysis_module
 from mif_pipeline.post_analysis import (
     DecodeResult,
+    TissueArtifactGeoJSON,
     TumorGeoJSON,
+    assign_tissue_artifact_flag,
     assign_tumor_ids,
     build_codebook_from_csv,
     build_slide_analysis,
     concat_slide_analyses,
     decode_perturbview,
     export_slide_analysis,
+    read_tissue_artifact_geojson,
     read_tumor_geojson,
     table_join_diagnostics,
 )
@@ -81,6 +84,10 @@ class DummyAnnData:
     @property
     def obs_names(self):
         return self.obs.index
+
+    @property
+    def var_names(self):
+        return self.var.index
 
     def copy(self):
         return copy.deepcopy(self)
@@ -204,6 +211,37 @@ def test_metadata_free_annotation_geojson_uses_feature_names(monkeypatch, tmp_pa
         )
 
 
+def test_tissue_artifact_geojson_needs_no_feature_labels(monkeypatch, tmp_path: Path):
+    monkeypatch.setattr(
+        analysis_module,
+        "_import_shapely",
+        lambda: (
+            lambda payload: FakeGeometry(payload),
+            lambda geometry, xfact, yfact, origin: FakeGeometry(
+                geometry.payload, scale_factor=(xfact, yfact, origin)
+            ),
+        ),
+    )
+    payload = _geojson_payload()
+    payload["features"][0]["properties"] = {}
+    payload["features"].append(copy.deepcopy(payload["features"][0]))
+    payload["features"][1]["id"] = "fold-2"
+    path = tmp_path / "artifacts.geojson"
+    path.write_text(json.dumps(payload), encoding="utf-8")
+
+    artifacts = read_tissue_artifact_geojson(
+        path,
+        expected_slide_id="SLIDE-A",
+        expected_pixel_size_um=0.5,
+        expected_canvas_shape_yx=(100, 200),
+    )
+
+    assert artifacts.source_feature_ids == ("feature_0001", "fold-2")
+    assert len(artifacts.global_geometries) == 2
+    assert artifacts.global_geometries[0].scale_factor == (0.5, 0.5, (0.0, 0.0))
+    assert artifacts.metadata["binary_obs_column"] == "tissue_artifact"
+
+
 def test_tumor_assignment_uses_vector_cell_ids_and_rejects_overlaps(monkeypatch):
     master = DummyTable(np.ones((3, 1)), [1, 7, 20], ["DAPI"])
     master.obs["instance_id"] = [
@@ -263,6 +301,48 @@ def test_tumor_assignment_uses_vector_cell_ids_and_rejects_overlaps(monkeypatch)
 
     with pytest.raises(ValueError, match="more than one tumor"):
         assign_tumor_ids(sdata, tumors, polygon_query_func=overlapping_query)
+
+
+def test_tissue_artifact_assignment_is_binary_and_allows_overlapping_regions(monkeypatch):
+    master = DummyTable(np.ones((4, 1)), [1, 7, 20, 50], ["DAPI"])
+    cell_boundaries = pd.DataFrame({"cell_id": [1, 7, 20, 50]})
+    sdata = types.SimpleNamespace(
+        tables={"agg_cell_labels": master},
+        shapes={"cell_boundaries": cell_boundaries},
+    )
+
+    class DummySpatialData:
+        def __init__(self, *, shapes):
+            self.shapes = shapes
+
+    monkeypatch.setattr(analysis_module, "_import_spatialdata_class", lambda: DummySpatialData)
+    artifacts = TissueArtifactGeoJSON(
+        path=Path("artifacts.geojson"),
+        metadata={},
+        pixel_geometries=("p1", "p2"),
+        global_geometries=("g1", "g2"),
+        source_feature_ids=("source-1", "source-2"),
+    )
+
+    def query(_sdata, *, polygon, **kwargs):
+        ids = [1, 7] if polygon == "g1" else [7, 20]
+        return types.SimpleNamespace(
+            shapes={"cell_boundaries": pd.DataFrame({"cell_id": ids})}
+        )
+
+    progress_messages = []
+    flags, summary = assign_tissue_artifact_flag(
+        sdata,
+        artifacts,
+        polygon_query_func=query,
+        progress=progress_messages.append,
+    )
+
+    assert flags.to_dict() == {"1": 1, "7": 1, "20": 1, "50": 0}
+    assert flags.dtype == np.int8
+    assert summary.set_index("tissue_artifact")["n_cells"].to_dict() == {0: 1, 1: 3}
+    assert progress_messages[0] == "Querying tissue-artifact region 1/2"
+    assert progress_messages[-1].startswith("Finished tissue-artifact region 2/2")
 
 
 def test_codebook_and_decoder_handle_eligible_missing_and_unknown_cells(tmp_path: Path):
@@ -384,6 +464,7 @@ def test_slide_analysis_is_cell_aligned_and_cytoplasm_is_optional():
         sdata,
         slide_id="SLIDE-A",
         tumor_ids=tumor_ids,
+        tissue_artifact=pd.Series({"7": 1, "1": 0}, name="tissue_artifact"),
         decode_result=_decode_result([1, 7]),
         nuclear_intensities=pd.DataFrame(
             [[9.0, 8.0], [np.nan, np.nan]],
@@ -394,6 +475,8 @@ def test_slide_analysis_is_cell_aligned_and_cytoplasm_is_optional():
     )
 
     assert list(result.obs_names) == ["SLIDE-A_1", "SLIDE-A_7"]
+    assert result.obs["tissue_artifact"].tolist() == [0, 1]
+    assert result.obs["tissue_artifact"].dtype == np.int8
     assert "nucleus" in result.layers
     np.testing.assert_allclose(result.layers["nucleus"][0], [9.0, 8.0])
     assert np.isnan(result.layers["nucleus"][1]).all()
@@ -441,18 +524,18 @@ def test_export_skips_full_observation_csv_by_default(tmp_path: Path):
     assert progress_messages[0].startswith("Writing AnnData:")
 
 
-def test_cohort_normalizes_optional_cytoplasm_and_modality_columns():
-    def make(slide_id, *, cytoplasm, nimbus_column):
+def test_cohort_normalizes_optional_cytoplasm_and_builds_padded_nimbus_layer():
+    def make(slide_id, *, cytoplasm):
         obj = DummyAnnData(
-            [[1.0]],
+            [[1.0, 2.0]],
             pd.DataFrame(index=[f"{slide_id}_1"]),
-            pd.DataFrame(index=["A"]),
+            pd.DataFrame(index=["A", "B"]),
         )
-        obj.layers["nucleus"] = np.array([[2.0]])
+        obj.layers["nucleus"] = np.array([[2.0, 3.0]])
         if cytoplasm:
-            obj.layers["cytoplasm"] = np.array([[3.0]])
+            obj.layers["cytoplasm"] = np.array([[3.0, 4.0]])
         obj.obsm["nimbus"] = pd.DataFrame(
-            [[4.0]], index=obj.obs_names, columns=[nimbus_column]
+            [[4.0]], index=obj.obs_names, columns=["A"]
         )
         return obj
 
@@ -464,19 +547,97 @@ def test_cohort_normalizes_optional_cytoplasm_and_modality_columns():
 
     cohort = concat_slide_analyses(
         {
-            "S1": make("S1", cytoplasm=True, nimbus_column="A"),
-            "S2": make("S2", cytoplasm=False, nimbus_column="B"),
+            "S1": make("S1", cytoplasm=True),
+            "S2": make("S2", cytoplasm=False),
         },
         ad_module=types.SimpleNamespace(concat=fake_concat),
     )
 
     second = captured["values"][1]
     assert np.isnan(second.layers["cytoplasm"]).all()
-    assert list(second.obsm["nimbus"].columns) == ["A", "B"]
+    np.testing.assert_allclose(second.layers["nimbus"], [[4.0, 0.0]])
+    assert second.var["nimbus_available"].tolist() == [True, False]
+    assert "nimbus" not in second.obsm
     assert cohort.uns["post_analysis_cohort"]["cytoplasm_available_by_slide"] == {
         "S1": True,
         "S2": False,
     }
+    assert cohort.uns["post_analysis_cohort"]["nimbus_columns"] == ["A"]
+    assert cohort.uns["post_analysis_cohort"]["nimbus_storage"] == "layers['nimbus']"
+
+
+def test_cohort_preserves_optional_tissue_artifact_as_unknown_not_zero():
+    def make(slide_id, *, annotated):
+        obj = DummyAnnData(
+            [[1.0]],
+            pd.DataFrame(index=[f"{slide_id}_1"]),
+            pd.DataFrame(index=["A"]),
+        )
+        if annotated:
+            obj.obs["tissue_artifact"] = np.array([0], dtype=np.int8)
+        obj.obsm["nimbus"] = pd.DataFrame(
+            [[4.0]], index=obj.obs_names, columns=["A"]
+        )
+        return obj
+
+    captured = {}
+
+    def fake_concat(values, **kwargs):
+        captured["values"] = values
+        return types.SimpleNamespace(uns={})
+
+    cohort = concat_slide_analyses(
+        {"S1": make("S1", annotated=True), "S2": make("S2", annotated=False)},
+        ad_module=types.SimpleNamespace(concat=fake_concat),
+    )
+
+    assert captured["values"][0].obs["tissue_artifact"].tolist() == [0.0]
+    assert captured["values"][1].obs["tissue_artifact"].isna().all()
+    assert cohort.uns["post_analysis_cohort"]["tissue_artifact_available_by_slide"] == {
+        "S1": True,
+        "S2": False,
+    }
+
+
+def test_cohort_rejects_inconsistent_intensity_or_nimbus_channels():
+    def make(slide_id, intensity_columns, nimbus_columns, nimbus_values=None):
+        obj = DummyAnnData(
+            np.ones((1, len(intensity_columns))),
+            pd.DataFrame(index=[f"{slide_id}_1"]),
+            pd.DataFrame(index=intensity_columns),
+        )
+        values = nimbus_values or [1.0] * len(nimbus_columns)
+        obj.obsm["nimbus"] = pd.DataFrame(
+            [values], index=obj.obs_names, columns=nimbus_columns
+        )
+        return obj
+
+    with pytest.raises(ValueError, match="intensity channels must match exactly"):
+        concat_slide_analyses(
+            {
+                "S1": make("S1", ["A", "B"], ["A"]),
+                "S2": make("S2", ["A"], ["A"]),
+            },
+            ad_module=types.SimpleNamespace(concat=lambda *args, **kwargs: None),
+        )
+
+    with pytest.raises(ValueError, match="Nimbus channels must match exactly"):
+        concat_slide_analyses(
+            {
+                "S1": make("S1", ["A", "B"], ["A"]),
+                "S2": make("S2", ["A", "B"], ["B"]),
+            },
+            ad_module=types.SimpleNamespace(concat=lambda *args, **kwargs: None),
+        )
+
+    with pytest.raises(ValueError, match="nonfinite values"):
+        concat_slide_analyses(
+            {
+                "S1": make("S1", ["A", "B"], ["A"], [np.nan]),
+                "S2": make("S2", ["A", "B"], ["A"]),
+            },
+            ad_module=types.SimpleNamespace(concat=lambda *args, **kwargs: None),
+        )
 
 
 def test_join_diagnostics_reports_absent_optional_tables():
@@ -527,9 +688,14 @@ def test_analysis_notebook_uses_read_only_helpers():
     )
 
     assert "assign_tumor_ids" in code
+    assert "assign_tissue_artifact_flag" in code
+    assert "read_tissue_artifact_geojson" in code
+    assert 'column="tissue_artifact"' in code
     assert "decode_perturbview" in code
     assert "build_slide_analysis" in code
     assert "concat_slide_analyses" in code
+    assert '"nimbus_storage"' in code
+    assert "nimbus_available" in code
     assert "compact_decode_metrics" in code
     assert "exclude_values={no_call_label}" in code
     assert "for slide_id, record in records.items()" in code
@@ -539,3 +705,19 @@ def test_analysis_notebook_uses_read_only_helpers():
     assert "Guide-frequency rank by tumor" not in code
     assert "write_element" not in code
     assert "delete_element_from_disk" not in code
+
+
+def test_cohort_qc_notebook_validates_padded_nimbus_layer():
+    path = Path("prototyping/cohort_tumor_decode_qc.ipynb")
+    notebook = json.loads(path.read_text(encoding="utf-8"))
+    code = "\n".join(
+        "".join(cell.get("source", []))
+        for cell in notebook["cells"]
+        if cell.get("cell_type") == "code"
+    )
+
+    assert 'cohort.layers["nimbus"]' in code
+    assert 'cohort.var["nimbus_available"]' in code
+    assert "expected_nimbus_nonfinite_values" in code
+    assert "padding_nonzero_values" in code
+    assert "NIMBUS_QC_CHUNK_ROWS" in code

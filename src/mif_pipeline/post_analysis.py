@@ -1,4 +1,4 @@
-"""Read-only helpers for tumor annotation and PerturbView-style guide decoding.
+"""Read-only helpers for region annotation and PerturbView-style guide decoding.
 
 This module deliberately sits outside the pipeline stage graph.  It reads completed
 SpatialData stores and builds separate analysis artifacts; it never writes elements
@@ -28,6 +28,17 @@ class TumorGeoJSON:
     path: Path
     metadata: dict[str, Any]
     tumor_ids: tuple[str, ...]
+    pixel_geometries: tuple[Any, ...]
+    global_geometries: tuple[Any, ...]
+    source_feature_ids: tuple[str, ...]
+
+
+@dataclass(frozen=True)
+class TissueArtifactGeoJSON:
+    """Validated binary tissue-artifact regions in pixel and micron coordinates."""
+
+    path: Path
+    metadata: dict[str, Any]
     pixel_geometries: tuple[Any, ...]
     global_geometries: tuple[Any, ...]
     source_feature_ids: tuple[str, ...]
@@ -236,6 +247,95 @@ def read_tumor_geojson(
     )
 
 
+def read_tissue_artifact_geojson(
+    path: str | Path,
+    *,
+    expected_slide_id: str,
+    expected_pixel_size_um: float,
+    expected_canvas_shape_yx: Sequence[int],
+) -> TissueArtifactGeoJSON:
+    """Read binary tissue-artifact polygons as full-resolution pixel coordinates.
+
+    Feature names and properties are ignored. Every Polygon or MultiPolygon in the
+    file contributes to the same binary artifact flag.
+    """
+
+    geojson_path = Path(path).expanduser().resolve()
+    if not geojson_path.exists():
+        raise FileNotFoundError(geojson_path)
+    payload = json.loads(geojson_path.read_text(encoding="utf-8"))
+    if payload.get("type") != "FeatureCollection":
+        raise ValueError(f"{geojson_path} must contain a GeoJSON FeatureCollection.")
+
+    expected_canvas = tuple(int(value) for value in expected_canvas_shape_yx)
+    if len(expected_canvas) != 2 or any(value <= 0 for value in expected_canvas):
+        raise ValueError(f"Expected store canvas must be a positive (y, x) pair, got {expected_canvas}.")
+    file_pixel_size = float(expected_pixel_size_um)
+    if not np.isfinite(file_pixel_size) or file_pixel_size <= 0:
+        raise ValueError(f"Expected slide pixel size must be positive, got {file_pixel_size}.")
+
+    features = payload.get("features")
+    if not isinstance(features, list) or not features:
+        raise ValueError(f"No tissue-artifact features found in {geojson_path}.")
+
+    shape_geometry, scale_geometry = _import_shapely()
+    source_feature_ids: list[str] = []
+    pixel_geometries: list[Any] = []
+    global_geometries: list[Any] = []
+    canvas_y, canvas_x = expected_canvas
+    for index, feature in enumerate(features):
+        if not isinstance(feature, dict):
+            raise ValueError(f"GeoJSON feature {index} is not a mapping.")
+        source_feature_id = str(feature.get("id", f"feature_{index + 1:04d}")).strip()
+        if not source_feature_id:
+            source_feature_id = f"feature_{index + 1:04d}"
+        geometry = shape_geometry(feature.get("geometry"))
+        if geometry.is_empty:
+            raise ValueError(f"Tissue-artifact feature {index} has an empty geometry.")
+        if geometry.geom_type not in {"Polygon", "MultiPolygon"}:
+            raise ValueError(
+                f"Tissue-artifact feature {index} must be a Polygon or MultiPolygon, "
+                f"got {geometry.geom_type}."
+            )
+        if not geometry.is_valid:
+            raise ValueError(f"Tissue-artifact feature {index} has an invalid geometry.")
+        min_x, min_y, max_x, max_y = (float(value) for value in geometry.bounds)
+        if min_x < 0 or min_y < 0 or max_x > canvas_x or max_y > canvas_y:
+            raise ValueError(
+                f"Tissue-artifact feature {index} bounds {(min_x, min_y, max_x, max_y)} "
+                f"fall outside the full-resolution (y, x) canvas {expected_canvas}."
+            )
+        source_feature_ids.append(source_feature_id)
+        pixel_geometries.append(geometry)
+        global_geometries.append(
+            scale_geometry(
+                geometry,
+                xfact=file_pixel_size,
+                yfact=file_pixel_size,
+                origin=(0.0, 0.0),
+            )
+        )
+
+    metadata = {
+        "slide_id": str(expected_slide_id),
+        "coordinate_units": "intrinsic_full_resolution_pixels",
+        "axis_order": "x_y",
+        "canvas_shape_yx": list(expected_canvas),
+        "pixel_size_um": file_pixel_size,
+        "metadata_source": "loaded_slide_and_raw_pixel_assumption",
+        "source_filename": geojson_path.name,
+        "source_feature_ids": list(source_feature_ids),
+        "binary_obs_column": "tissue_artifact",
+    }
+    return TissueArtifactGeoJSON(
+        path=geojson_path,
+        metadata=metadata,
+        pixel_geometries=tuple(pixel_geometries),
+        global_geometries=tuple(global_geometries),
+        source_feature_ids=tuple(source_feature_ids),
+    )
+
+
 def _normalize_instance_id(value: Any) -> str:
     if pd.isna(value):
         raise ValueError("Instance IDs must not be missing.")
@@ -386,6 +486,100 @@ def assign_tumor_ids(
         .reset_index(name="n_cells")
     )
     return assignments, summary
+
+
+def assign_tissue_artifact_flag(
+    sdata: Any,
+    artifacts: TissueArtifactGeoJSON,
+    *,
+    table_name: str = "agg_cell_labels",
+    coordinate_system: str = "global",
+    polygon_query_func: Callable[..., Any] | None = None,
+    progress: Callable[[str], None] | None = None,
+) -> tuple[pd.Series, pd.DataFrame]:
+    """Flag master cells intersecting any tissue-artifact polygon as one."""
+
+    shape_name = "cell_boundaries"
+    shape_instance_key = "cell_id"
+    if table_name not in sdata.tables:
+        raise KeyError(f"SpatialData store is missing required table {table_name!r}.")
+    if shape_name not in sdata.shapes:
+        raise KeyError(f"SpatialData store is missing required vector shapes {shape_name!r}.")
+    table = sdata.tables[table_name]
+    master_ids = table_instance_ids(table, table_name=table_name)
+    cell_shapes = sdata.shapes[shape_name]
+    if shape_instance_key not in cell_shapes.columns:
+        raise KeyError(
+            f"Vector shapes {shape_name!r} are missing required ID column {shape_instance_key!r}."
+        )
+    vector_ids = pd.Index(
+        [_normalize_instance_id(value) for value in cell_shapes[shape_instance_key]],
+        name="instance_id",
+    )
+    if vector_ids.has_duplicates:
+        duplicated = vector_ids[vector_ids.duplicated()].unique().tolist()[:10]
+        raise ValueError(f"{shape_name}.{shape_instance_key} contains duplicate IDs: {duplicated}")
+    unknown_vector_ids = vector_ids.difference(master_ids)
+    if len(unknown_vector_ids):
+        raise ValueError(
+            f"{shape_name}.{shape_instance_key} contains IDs absent from {table_name}: "
+            f"{unknown_vector_ids.tolist()[:10]}"
+        )
+
+    flags = pd.Series(0, index=master_ids, name="tissue_artifact", dtype=np.int8)
+    query = polygon_query_func or _import_polygon_query()
+    SpatialData = _import_spatialdata_class()
+    vector_sdata = SpatialData(shapes={shape_name: cell_shapes})
+
+    region_count = len(artifacts.global_geometries)
+    for region_index, polygon in enumerate(artifacts.global_geometries, start=1):
+        if progress is not None:
+            progress(f"Querying tissue-artifact region {region_index}/{region_count}")
+        started_at = perf_counter()
+        try:
+            queried = query(
+                vector_sdata,
+                polygon=polygon,
+                target_coordinate_system=coordinate_system,
+                filter_table=False,
+            )
+        except AssertionError:
+            queried = None
+        if queried is None or shape_name not in queried.shapes:
+            selected = pd.Index([], dtype="object", name="instance_id")
+        else:
+            selected_shapes = queried.shapes[shape_name]
+            if shape_instance_key not in selected_shapes.columns:
+                raise KeyError(
+                    f"Queried shapes {shape_name!r} lost ID column {shape_instance_key!r}."
+                )
+            selected = pd.Index(
+                [_normalize_instance_id(value) for value in selected_shapes[shape_instance_key]],
+                name="instance_id",
+            )
+        if selected.has_duplicates:
+            duplicated = selected[selected.duplicated()].unique().tolist()[:10]
+            raise ValueError(f"polygon_query returned duplicate vector IDs: {duplicated}")
+        unknown = selected.difference(master_ids)
+        if len(unknown):
+            raise ValueError(
+                f"polygon_query returned vector IDs absent from {table_name}: "
+                f"{unknown.tolist()[:10]}"
+            )
+        flags.loc[selected] = 1
+        if progress is not None:
+            progress(
+                f"Finished tissue-artifact region {region_index}/{region_count}: "
+                f"{len(selected):,} intersecting cells; query {perf_counter() - started_at:.1f} s"
+            )
+
+    summary = pd.DataFrame(
+        {
+            "tissue_artifact": [0, 1],
+            "n_cells": [int((flags == 0).sum()), int((flags == 1).sum())],
+        }
+    )
+    return flags, summary
 
 
 def build_codebook_from_csv(
@@ -818,6 +1012,7 @@ def build_slide_analysis(
     *,
     slide_id: str,
     tumor_ids: pd.Series,
+    tissue_artifact: pd.Series | None = None,
     decode_result: DecodeResult,
     nuclear_intensities: pd.DataFrame | None = None,
     sample_metadata: Mapping[str, Any] | None = None,
@@ -843,6 +1038,13 @@ def build_slide_analysis(
             raise ValueError(f"sample_metadata may not override reserved field {key!r}.")
         obs[str(key)] = value
     obs["tumor_id"] = tumor_ids.reindex(master_ids).fillna("unassigned").astype("string")
+    if tissue_artifact is not None:
+        artifact_values = pd.to_numeric(
+            tissue_artifact.reindex(master_ids), errors="coerce"
+        )
+        if artifact_values.isna().any() or not artifact_values.isin([0, 1]).all():
+            raise ValueError("tissue_artifact must provide a binary 0/1 value for every master cell.")
+        obs["tissue_artifact"] = artifact_values.to_numpy(dtype=np.int8)
     decode = decode_result.cell_calls.reindex(master_ids)
     duplicate_decode_columns = sorted(set(obs.columns).intersection(decode.columns))
     if duplicate_decode_columns:
@@ -968,6 +1170,87 @@ def concat_slide_analyses(
         str(slide_id): value.copy() if copy_inputs else value
         for slide_id, value in slide_analyses.items()
     }
+    reference_slide_id = next(iter(prepared))
+    intensity_columns = [
+        str(value) for value in prepared[reference_slide_id].var_names
+    ]
+    if not intensity_columns or len(set(intensity_columns)) != len(intensity_columns):
+        raise ValueError(
+            f"Reference slide {reference_slide_id} must have a non-empty unique intensity channel axis."
+        )
+    for slide_id, value in prepared.items():
+        columns = [str(item) for item in value.var_names]
+        if columns != intensity_columns:
+            missing = [item for item in intensity_columns if item not in columns]
+            extra = [item for item in columns if item not in intensity_columns]
+            raise ValueError(
+                "Cohort intensity channels must match exactly in name and order across slides. "
+                f"Reference slide {reference_slide_id}: {intensity_columns}; slide {slide_id}: "
+                f"{columns}; missing={missing}; extra={extra}."
+            )
+
+    nimbus_columns: list[str] | None = None
+    nimbus_positions: np.ndarray | None = None
+    for slide_id, value in prepared.items():
+        if "nimbus" not in value.obsm:
+            raise ValueError(
+                f"Slide {slide_id} is missing obsm['nimbus']; every cohort slide must have Nimbus."
+            )
+        block = value.obsm["nimbus"]
+        if not isinstance(block, pd.DataFrame):
+            raise TypeError(f"Slide {slide_id} obsm['nimbus'] must be a labeled pandas DataFrame.")
+        columns = [str(item) for item in block.columns]
+        if not columns or len(set(columns)) != len(columns):
+            raise ValueError(f"Slide {slide_id} must have a non-empty unique Nimbus channel axis.")
+        if nimbus_columns is None:
+            nimbus_columns = columns
+            missing_from_intensity = [item for item in columns if item not in intensity_columns]
+            if missing_from_intensity:
+                raise ValueError(
+                    "Nimbus channels must be a subset of the intensity channel axis; "
+                    f"missing aliases: {missing_from_intensity}."
+                )
+            nimbus_positions = np.asarray(
+                [intensity_columns.index(item) for item in columns], dtype=int
+            )
+        elif columns != nimbus_columns:
+            missing = [item for item in nimbus_columns if item not in columns]
+            extra = [item for item in columns if item not in nimbus_columns]
+            raise ValueError(
+                "Cohort Nimbus channels must match exactly in name and order across slides. "
+                f"Reference slide {reference_slide_id}: {nimbus_columns}; slide {slide_id}: "
+                f"{columns}; missing={missing}; extra={extra}."
+            )
+        if not block.index.equals(value.obs_names):
+            raise ValueError(f"Slide {slide_id} obsm['nimbus'] rows are not aligned to obs_names.")
+        values = block.to_numpy(dtype=np.float32, copy=False)
+        nonfinite_count = sum(
+            int((~np.isfinite(values[:, column_index])).sum())
+            for column_index in range(values.shape[1])
+        )
+        if nonfinite_count:
+            raise ValueError(
+                f"Slide {slide_id} contains {nonfinite_count:,} nonfinite values in expected Nimbus channels."
+            )
+        padded = np.zeros(value.shape, dtype=np.float32)
+        padded[:, nimbus_positions] = values
+        value.layers["nimbus"] = padded
+        value.var["nimbus_available"] = np.isin(intensity_columns, nimbus_columns)
+        del value.obsm["nimbus"]
+
+    assert nimbus_columns is not None
+    tissue_artifact_available = {
+        str(slide_id): "tissue_artifact" in value.obs.columns
+        for slide_id, value in prepared.items()
+    }
+    if any(tissue_artifact_available.values()) and not all(tissue_artifact_available.values()):
+        for slide_id, value in prepared.items():
+            if tissue_artifact_available[slide_id]:
+                value.obs["tissue_artifact"] = pd.to_numeric(
+                    value.obs["tissue_artifact"], errors="raise"
+                ).astype(np.float32)
+            else:
+                value.obs["tissue_artifact"] = np.full(value.n_obs, np.nan, dtype=np.float32)
     obs_indexes = [pd.Index(value.obs_names.astype(str)) for value in prepared.values()]
     all_obs_names = obs_indexes[0].append(obs_indexes[1:])
     if all_obs_names.has_duplicates:
@@ -981,7 +1264,7 @@ def concat_slide_analyses(
                 value.layers["cytoplasm"] = np.full(value.shape, np.nan, dtype=np.float32)
 
     modality_columns: dict[str, list[str]] = {}
-    for key in ("nimbus", "alignment_zncc"):
+    for key in ("alignment_zncc",):
         columns = _stable_union(
             [
                 list(value.obsm[key].columns) if key in value.obsm else []
@@ -1011,10 +1294,19 @@ def concat_slide_analyses(
         fill_value=np.nan,
     )
     cohort.uns["post_analysis_cohort"] = {
-        "schema_version": 1,
+        "schema_version": 2,
         "slide_order": list(prepared),
         "cytoplasm_available_by_slide": cytoplasm_available,
-        "nimbus_columns": modality_columns["nimbus"],
+        "tissue_artifact_available_by_slide": tissue_artifact_available,
+        "intensity_columns": intensity_columns,
+        "nimbus_columns": nimbus_columns,
+        "nimbus_storage": "layers['nimbus']",
+        "nimbus_padding_value": 0.0,
+        "nimbus_padding_applies_only_outside_configured_subset": True,
+        "nimbus_expected_values_are_finite": True,
+        "strict_intensity_channel_validation": True,
+        "strict_nimbus_channel_validation": True,
+        "nimbus_obsm_retained": False,
         "alignment_columns": modality_columns["alignment_zncc"],
         "alignment_metric": "zncc_correlation",
         "input_objects_copied": bool(copy_inputs),
