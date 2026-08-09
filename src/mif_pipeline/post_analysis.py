@@ -1108,14 +1108,24 @@ def build_slide_analysis(
         nimbus.index = composite_ids
         analysis.obsm["nimbus"] = nimbus.astype(np.float32)
 
+    alignment_reference_channel: str | None = None
     if "alignment_qc" in sdata.tables:
+        alignment_table = sdata.tables["alignment_qc"]
         alignment = table_to_frame(
-            sdata.tables["alignment_qc"],
+            alignment_table,
             table_name="alignment_qc",
             layer="zncc_correlation",
         ).reindex(master_ids)
         alignment.index = composite_ids
         analysis.obsm["alignment_zncc"] = alignment.astype(np.float32)
+        if "is_reference" in alignment_table.var.columns:
+            reference_mask = alignment_table.var["is_reference"].fillna(False).to_numpy(dtype=bool)
+            reference_channels = alignment_table.var_names[reference_mask].astype(str).tolist()
+            if len(reference_channels) != 1:
+                raise ValueError(
+                    "alignment_qc var['is_reference'] must identify exactly one reference channel."
+                )
+            alignment_reference_channel = reference_channels[0]
 
     analysis.uns["post_analysis"] = {
         "schema_version": 1,
@@ -1130,6 +1140,7 @@ def build_slide_analysis(
         if "alignment_zncc" in analysis.obsm
         else [],
         "alignment_metric": "zncc_correlation",
+        "alignment_reference_channel": alignment_reference_channel,
         "spatial_coordinate_units": "micrometers",
         "spatial_coordinates_are_slide_local": True,
         "decode_thresholds": decode_result.thresholds,
@@ -1266,6 +1277,25 @@ def concat_slide_analyses(
             if "cytoplasm" not in value.layers:
                 value.layers["cytoplasm"] = np.full(value.shape, np.nan, dtype=np.float32)
 
+    alignment_reference_channels = {
+        str(reference)
+        for value in prepared.values()
+        if (
+            reference := value.uns.get("post_analysis", {}).get(
+                "alignment_reference_channel"
+            )
+        )
+        is not None
+    }
+    if len(alignment_reference_channels) > 1:
+        raise ValueError(
+            "Cohort slides disagree on the alignment reference channel: "
+            f"{sorted(alignment_reference_channels)}"
+        )
+    alignment_reference_channel = (
+        next(iter(alignment_reference_channels)) if alignment_reference_channels else None
+    )
+
     modality_columns: dict[str, list[str]] = {}
     for key in ("alignment_zncc",):
         columns = _stable_union(
@@ -1313,6 +1343,7 @@ def concat_slide_analyses(
         "nimbus_obsm_retained": False,
         "alignment_columns": modality_columns["alignment_zncc"],
         "alignment_metric": "zncc_correlation",
+        "alignment_reference_channel": alignment_reference_channel,
         "input_objects_copied": bool(copy_inputs),
         "missing_measurements_are_nan": True,
         "spatial_coordinates_are_slide_local": True,

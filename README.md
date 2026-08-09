@@ -256,6 +256,9 @@ H5AD in backed mode. It recalculates slide-, round-, tumor-, and guide-level dec
 from the saved per-cell `decode_*` observation fields, and plots tumor-assigned cells and mapped
 guide calls in slide-local micron coordinates. It also validates the persisted Nimbus layer in
 row chunks, requiring finite expected Nimbus values and exact zeros only in padded channels.
+For alignment QC, it excludes the explicit reference alias, derives each cell's minimum finite
+ZNCC correlation across comparison rounds, reports slide- and round-level missingness and
+quantiles, and plots fixed-scale whole-slide and selected-zoom maps without filtering cells.
 Original tumor polygon geometries and each slide's
 fitted threshold/scaling dictionaries are not consolidated into the cohort H5AD; those remain in
 the source GeoJSON and slide-local post-analysis outputs.

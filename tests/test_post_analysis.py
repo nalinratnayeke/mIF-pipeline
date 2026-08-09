@@ -450,6 +450,7 @@ def test_slide_analysis_is_cell_aligned_and_cytoplasm_is_optional():
         ["R1_DAPI", "R2_DAPI"],
         layers={"zncc_correlation": np.array([[1.0, 0.8], [1.0, 0.4]])},
     )
+    alignment.var["is_reference"] = [True, False]
     sdata = types.SimpleNamespace(
         tables={
             "agg_cell_labels": cell,
@@ -485,6 +486,7 @@ def test_slide_analysis_is_cell_aligned_and_cytoplasm_is_optional():
     assert list(result.obsm["nimbus"].index) == list(result.obs_names)
     np.testing.assert_allclose(result.obsm["nimbus"].loc["SLIDE-A_1"], [0.2])
     assert list(result.obsm["alignment_zncc"].columns) == ["R1_DAPI", "R2_DAPI"]
+    assert result.uns["post_analysis"]["alignment_reference_channel"] == "R1_DAPI"
 
 
 def test_export_skips_full_observation_csv_by_default(tmp_path: Path):
@@ -746,3 +748,8 @@ def test_cohort_qc_notebook_validates_padded_nimbus_layer():
     assert "expected_nimbus_nonfinite_values" in code
     assert "padding_nonzero_values" in code
     assert "NIMBUS_QC_CHUNK_ROWS" in code
+    assert "minimum_zncc" in code
+    assert "comparison_columns" in code
+    assert "ALIGNMENT_REFERENCE_CHANNEL" in code
+    assert "scatter_minimum_zncc" in code
+    assert 'vmin=-1, vmax=1' in code
