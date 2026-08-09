@@ -756,3 +756,5 @@ def test_cohort_qc_notebook_validates_padded_nimbus_layer():
     assert "plot_round_alignment_maps" in code
     assert "for slide_id in slide_order" in code
     assert "ZNCC correlation by comparison round" in code
+    assert "colorbar_axis = fig.add_axes" in code
+    assert "cax=colorbar_axis" in code
