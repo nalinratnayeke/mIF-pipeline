@@ -753,3 +753,6 @@ def test_cohort_qc_notebook_validates_padded_nimbus_layer():
     assert "ALIGNMENT_REFERENCE_CHANNEL" in code
     assert "scatter_minimum_zncc" in code
     assert 'vmin=-1, vmax=1' in code
+    assert "plot_round_alignment_maps" in code
+    assert "for slide_id in slide_order" in code
+    assert "ZNCC correlation by comparison round" in code
