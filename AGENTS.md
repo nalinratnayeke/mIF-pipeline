@@ -251,7 +251,7 @@ ic.TiffSlide = TiffSlide
 - Harpy allocation currently expects translation transforms during aggregation, so scale transforms must be handled carefully around finalize logic.
 - The pipeline writes the base image + labels first, then finalizes the same canonical store with aggregation, optional Nimbus import, and optional shapes.
 - Optional shapes are vectorized from labels with Harpy and should preserve the original non-contiguous raster instance IDs.
-- Harpy shape vectorization must remain compatible with both the current `harpy.sh.vectorize` naming and the legacy `harpy.shape.vectorize` naming; prefer API-capability detection over hard-coded version cutoffs.
+- Harpy shape vectorization and intensity allocation must remain compatible with both current and legacy parameter naming; prefer API-capability detection over hard-coded version cutoffs.
 - Mask chunking must be aligned to the image chunk grid before Harpy aggregation when using native spatial chunks.
 
 ## Documentation Expectations

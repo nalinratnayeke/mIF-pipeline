@@ -2003,6 +2003,42 @@ def test_harpy_vectorization_supports_current_parameters_in_legacy_namespace():
     }
 
 
+def test_harpy_intensity_allocation_supports_current_parameters():
+    calls = []
+
+    class DummyHarpy:
+        __version__ = "4.5.6"
+
+        class tb:
+            @staticmethod
+            def allocate_intensity(
+                sdata,
+                image_name=None,
+                labels_name=None,
+                output_table_name="table_intensities",
+                mode="mean",
+            ):
+                calls.append((image_name, labels_name, output_table_name, mode))
+                return sdata
+
+    sdata = object()
+    returned, details = spatialdata_builder_module._call_harpy_allocate_intensity(
+        DummyHarpy,
+        sdata,
+        image_name="full_image",
+        label_name="cell_labels",
+        table_name="agg_cell_labels",
+        common_kwargs={"mode": "mean"},
+    )
+
+    assert returned is sdata
+    assert calls == [("full_image", "cell_labels", "agg_cell_labels", "mean")]
+    assert details == {
+        "harpy_version": "4.5.6",
+        "harpy_allocate_api": "image_name/labels_name/output_table_name",
+    }
+
+
 def test_build_spatialdata_execution_with_stubs(monkeypatch, tmp_path: Path):
     import pandas as pd
 
@@ -2037,8 +2073,22 @@ def test_build_spatialdata_execution_with_stubs(monkeypatch, tmp_path: Path):
     assert result["shapes"] == ["cell_boundaries", "nuclear_boundaries"]
     assert result["tables"] == ["agg_cell_labels", "agg_nuclear_labels", "nimbus_table"]
     assert result["vectorization"] == [
-        {"name": "cell_boundaries", "backend": "harpy", "row_count": 2},
-        {"name": "nuclear_boundaries", "backend": "harpy", "row_count": 2},
+        {
+            "name": "cell_boundaries",
+            "backend": "harpy",
+            "row_count": 2,
+            "harpy_version": "unknown",
+            "harpy_namespace": "shape",
+            "harpy_vectorize_api": "labels_layer/output_layer",
+        },
+        {
+            "name": "nuclear_boundaries",
+            "backend": "harpy",
+            "row_count": 2,
+            "harpy_version": "unknown",
+            "harpy_namespace": "shape",
+            "harpy_vectorize_api": "labels_layer/output_layer",
+        },
     ]
     cell_shapes = result["sdata"].shapes["cell_boundaries"].payload
     assert list(cell_shapes["cell_id"]) == [1, 2]
@@ -2235,9 +2285,30 @@ def test_build_spatialdata_execution_can_aggregate_and_vectorize_cytoplasm(monke
         "nimbus_table",
     ]
     assert result["vectorization"] == [
-        {"name": "cell_boundaries", "backend": "harpy", "row_count": 2},
-        {"name": "nuclear_boundaries", "backend": "harpy", "row_count": 2},
-        {"name": "cytoplasm_boundaries", "backend": "harpy", "row_count": 1},
+        {
+            "name": "cell_boundaries",
+            "backend": "harpy",
+            "row_count": 2,
+            "harpy_version": "unknown",
+            "harpy_namespace": "shape",
+            "harpy_vectorize_api": "labels_layer/output_layer",
+        },
+        {
+            "name": "nuclear_boundaries",
+            "backend": "harpy",
+            "row_count": 2,
+            "harpy_version": "unknown",
+            "harpy_namespace": "shape",
+            "harpy_vectorize_api": "labels_layer/output_layer",
+        },
+        {
+            "name": "cytoplasm_boundaries",
+            "backend": "harpy",
+            "row_count": 1,
+            "harpy_version": "unknown",
+            "harpy_namespace": "shape",
+            "harpy_vectorize_api": "labels_layer/output_layer",
+        },
     ]
     cytoplasm_shapes = result["sdata"].shapes["cytoplasm_boundaries"].payload
     assert list(cytoplasm_shapes["cell_id"]) == [2]

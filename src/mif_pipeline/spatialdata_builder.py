@@ -61,6 +61,8 @@ def _harpy_version(hp: Any) -> str:
     module_version = getattr(hp, "__version__", None)
     if module_version is not None:
         return str(module_version)
+    if getattr(hp, "__name__", None) != "harpy":
+        return "unknown"
     for distribution_name in ("harpy-analysis", "harpy"):
         try:
             return metadata.version(distribution_name)
@@ -128,6 +130,62 @@ def _call_harpy_vectorize(
     print(
         f"[spatialdata] Harpy vectorize version={harpy_version!r} "
         f"namespace={namespace_name!r} api={api!r}",
+        flush=True,
+    )
+    return sdata, details
+
+
+def _call_harpy_allocate_intensity(
+    hp: Any,
+    sdata: Any,
+    *,
+    image_name: str,
+    label_name: str,
+    table_name: str,
+    common_kwargs: dict[str, Any],
+) -> tuple[Any, dict[str, str]]:
+    """Call Harpy intensity allocation across its renamed parameters."""
+    allocate_intensity = hp.tb.allocate_intensity
+    harpy_version = _harpy_version(hp)
+    try:
+        parameters = inspect.signature(allocate_intensity).parameters
+    except (TypeError, ValueError):
+        parameters = {}
+
+    if {"image_name", "labels_name", "output_table_name"}.issubset(parameters):
+        api = "image_name/labels_name/output_table_name"
+        sdata = allocate_intensity(
+            sdata,
+            image_name=image_name,
+            labels_name=label_name,
+            output_table_name=table_name,
+            **common_kwargs,
+        )
+    elif {"img_layer", "labels_layer", "output_layer"}.issubset(parameters):
+        api = "img_layer/labels_layer/output_layer"
+        sdata = allocate_intensity(
+            sdata,
+            img_layer=image_name,
+            labels_layer=label_name,
+            output_layer=table_name,
+            **common_kwargs,
+        )
+    else:
+        api = "positional"
+        sdata = allocate_intensity(
+            sdata,
+            image_name,
+            label_name,
+            table_name,
+            **common_kwargs,
+        )
+
+    details = {
+        "harpy_version": harpy_version,
+        "harpy_allocate_api": api,
+    }
+    print(
+        f"[spatialdata] Harpy allocate_intensity version={harpy_version!r} api={api!r}",
         flush=True,
     )
     return sdata, details
@@ -648,19 +706,22 @@ def _allocate_label_intensity(
         "cytoplasm_labels": "cytoplasm_size",
     }
     size_key = size_keys.get(label_name, f"{label_name}_size")
-    sdata = hp.tb.allocate_intensity(
+    sdata, harpy_details = _call_harpy_allocate_intensity(
+        hp,
         sdata,
-        img_layer="full_image",
-        labels_layer=label_name,
-        output_layer=table_name,
-        mode=aggregation_mode,
-        obs_stats=["count"],
-        instance_size_key=size_key,
-        chunks=None,
-        append=False,
-        calculate_center_of_mass=not run_on_gpu,
-        run_on_gpu=run_on_gpu,
-        overwrite=True,
+        image_name="full_image",
+        label_name=label_name,
+        table_name=table_name,
+        common_kwargs={
+            "mode": aggregation_mode,
+            "obs_stats": ["count"],
+            "instance_size_key": size_key,
+            "chunks": None,
+            "append": False,
+            "calculate_center_of_mass": not run_on_gpu,
+            "run_on_gpu": run_on_gpu,
+            "overwrite": True,
+        },
     )
     table = sdata.tables[table_name]
     return sdata, {
@@ -671,6 +732,7 @@ def _allocate_label_intensity(
         "aggregation_mode": aggregation_mode,
         "run_on_gpu": bool(run_on_gpu),
         "chunks": None,
+        **harpy_details,
     }
 
 
