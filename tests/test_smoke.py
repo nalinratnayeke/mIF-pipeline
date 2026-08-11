@@ -1902,10 +1902,105 @@ def test_harpy_vectorization_preserves_noncontiguous_label_ids():
     )
 
     frame = sdata.shapes["boundaries"]
-    assert result == {"name": "boundaries", "backend": "harpy", "row_count": 3}
+    assert result == {
+        "name": "boundaries",
+        "backend": "harpy",
+        "row_count": 3,
+        "harpy_version": "unknown",
+        "harpy_namespace": "shape",
+        "harpy_vectorize_api": "labels_layer/output_layer",
+    }
     assert list(frame["cell_id"]) == [1, 5, 9449]
     assert list(frame["instance_id"]) == ["1", "5", "9449"]
     assert list(frame.index) == ["1", "5", "9449"]
+
+
+def test_harpy_vectorization_supports_current_api_and_reports_version():
+    import pandas as pd
+
+    class DummyLabel:
+        payload = np.array([[0, 3], [3, 8]], dtype=np.uint32)
+
+    class DummySpatialData:
+        def __init__(self):
+            self.labels = {"labels": DummyLabel()}
+            self.shapes = {}
+
+        def __setitem__(self, key, value):
+            self.shapes[key] = value
+
+    class DummyHarpy:
+        __version__ = "9.8.7"
+
+        class sh:
+            @staticmethod
+            def vectorize(sdata, labels_name, output_shapes_name, instance_key="cell_ID", overwrite=False):
+                assert labels_name == "labels"
+                assert output_shapes_name == "boundaries"
+                assert instance_key == "cell_ID"
+                assert overwrite is True
+                labels = sorted(
+                    int(value)
+                    for value in np.unique(sdata.labels[labels_name].payload)
+                    if value > 0
+                )
+                frame = pd.DataFrame({"geometry": [f"geom_{label}" for label in labels]})
+                frame.index = pd.Index(labels, name=instance_key)
+                sdata.shapes[output_shapes_name] = frame
+                return sdata
+
+    class DummyShapesModel:
+        @staticmethod
+        def parse(frame):
+            return frame.copy()
+
+    sdata = DummySpatialData()
+    result = spatialdata_builder_module._vectorize_label_layer(
+        sdata,
+        hp=DummyHarpy,
+        label_name="labels",
+        shape_name="boundaries",
+        ShapesModel=DummyShapesModel,
+    )
+
+    assert list(sdata.shapes["boundaries"]["cell_id"]) == [3, 8]
+    assert result == {
+        "name": "boundaries",
+        "backend": "harpy",
+        "row_count": 2,
+        "harpy_version": "9.8.7",
+        "harpy_namespace": "sh",
+        "harpy_vectorize_api": "labels_name/output_shapes_name",
+    }
+
+
+def test_harpy_vectorization_supports_current_parameters_in_legacy_namespace():
+    calls = []
+
+    class DummyHarpy:
+        __version__ = "1.2.3"
+
+        class shape:
+            @staticmethod
+            def vectorize(sdata, labels_name, output_shapes_name, instance_key="cell_ID", overwrite=False):
+                calls.append((labels_name, output_shapes_name, instance_key, overwrite))
+                return sdata
+
+    sdata = object()
+    returned, details = spatialdata_builder_module._call_harpy_vectorize(
+        DummyHarpy,
+        sdata,
+        label_name="labels",
+        shape_name="boundaries",
+    )
+
+    assert returned is sdata
+    assert calls == [("labels", "boundaries", "cell_ID", True)]
+    assert details == {
+        "harpy_version": "1.2.3",
+        "harpy_namespace": "shape",
+        "harpy_vectorize_api": "labels_name/output_shapes_name",
+    }
 
 
 def test_build_spatialdata_execution_with_stubs(monkeypatch, tmp_path: Path):

@@ -1,9 +1,11 @@
 from __future__ import annotations
 
+import inspect
+from contextlib import nullcontext
+from importlib import metadata
 from pathlib import Path
 from time import perf_counter
 from typing import Any, Union
-from contextlib import nullcontext
 
 from .config import (
     canonical_nimbus_name,
@@ -52,6 +54,83 @@ def _import_harpy():
     except ImportError as exc:
         raise ImportError("SpatialData assembly requires 'harpy' in the active environment.") from exc
     return hp
+
+
+def _harpy_version(hp: Any) -> str:
+    """Return the installed Harpy version without assuming a distribution name."""
+    module_version = getattr(hp, "__version__", None)
+    if module_version is not None:
+        return str(module_version)
+    for distribution_name in ("harpy-analysis", "harpy"):
+        try:
+            return metadata.version(distribution_name)
+        except metadata.PackageNotFoundError:
+            continue
+    return "unknown"
+
+
+def _harpy_vectorize_callable(hp: Any) -> tuple[Any, str]:
+    """Resolve current (``harpy.sh``) and legacy (``harpy.shape``) namespaces."""
+    for namespace_name in ("sh", "shape"):
+        namespace = getattr(hp, namespace_name, None)
+        vectorize = getattr(namespace, "vectorize", None)
+        if callable(vectorize):
+            return vectorize, namespace_name
+    raise AttributeError(
+        "The installed Harpy package does not expose 'harpy.sh.vectorize' or "
+        "the legacy 'harpy.shape.vectorize' API."
+    )
+
+
+def _call_harpy_vectorize(
+    hp: Any,
+    sdata: Any,
+    *,
+    label_name: str,
+    shape_name: str,
+) -> tuple[Any, dict[str, str]]:
+    """Call Harpy vectorization across its legacy and current parameter names."""
+    vectorize, namespace_name = _harpy_vectorize_callable(hp)
+    harpy_version = _harpy_version(hp)
+    try:
+        parameters = inspect.signature(vectorize).parameters
+    except (TypeError, ValueError):
+        parameters = {}
+
+    common_kwargs = {"instance_key": "cell_ID", "overwrite": True}
+    if "labels_name" in parameters and "output_shapes_name" in parameters:
+        api = "labels_name/output_shapes_name"
+        sdata = vectorize(
+            sdata,
+            labels_name=label_name,
+            output_shapes_name=shape_name,
+            **common_kwargs,
+        )
+    elif "labels_layer" in parameters and "output_layer" in parameters:
+        api = "labels_layer/output_layer"
+        sdata = vectorize(
+            sdata,
+            labels_layer=label_name,
+            output_layer=shape_name,
+            **common_kwargs,
+        )
+    else:
+        # The first three positional parameters have retained the same meaning
+        # across the known Harpy APIs even when their names changed.
+        api = "positional"
+        sdata = vectorize(sdata, label_name, shape_name, **common_kwargs)
+
+    details = {
+        "harpy_version": harpy_version,
+        "harpy_namespace": namespace_name,
+        "harpy_vectorize_api": api,
+    }
+    print(
+        f"[spatialdata] Harpy vectorize version={harpy_version!r} "
+        f"namespace={namespace_name!r} api={api!r}",
+        flush=True,
+    )
+    return sdata, details
 
 
 def _import_anndata():
@@ -475,12 +554,11 @@ def _vectorize_label_layer(
     shape_name: str,
     ShapesModel: Any,
 ) -> dict[str, Any]:
-    sdata = hp.shape.vectorize(
+    sdata, harpy_details = _call_harpy_vectorize(
+        hp,
         sdata,
-        labels_layer=label_name,
-        output_layer=shape_name,
-        instance_key="cell_ID",
-        overwrite=True,
+        label_name=label_name,
+        shape_name=shape_name,
     )
     polygon_df = sdata.shapes[shape_name].copy()
     try:
@@ -495,6 +573,7 @@ def _vectorize_label_layer(
         "name": shape_name,
         "backend": "harpy",
         "row_count": int(len(polygon_df.index)),
+        **harpy_details,
     }
 
 

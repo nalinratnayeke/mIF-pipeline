@@ -306,6 +306,7 @@ The detailed rationale behind these decisions is documented in [METHODS.md](/hom
 
 - The merged OME-TIFF preserves channel names and physical pixel size metadata, but it does not currently reconstruct a full microscope `Instrument` block. Nimbus may therefore warn about missing instrument, detector, microscope-type, or objective metadata. These warnings have so far been treated as cosmetic unless downstream behavior is affected.
 - The per-slide runner logs SLURM, CUDA, `nvidia-smi`, and PyTorch GPU context at job start. This was added because some InstanSeg failures on the cluster were caused by unhealthy or unavailable GPU allocations rather than by true image-size overload.
+- SpatialData shape derivation detects the installed Harpy version and supports both the current `harpy.sh.vectorize(labels_name=..., output_shapes_name=...)` API and the legacy `harpy.shape.vectorize(labels_layer=..., output_layer=...)` API.
 
 ## Testing
 
