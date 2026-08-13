@@ -609,8 +609,75 @@ def _require_metric_arrays(root: Any, *, cell_count: int, channel_count: int) ->
     return metrics
 
 
-def _artifact_error() -> ValueError:
-    return ValueError("Existing alignment-QC output is not valid for this run; rerun with force=True.")
+def _artifact_error(reason: str | None = None) -> ValueError:
+    message = "Existing alignment-QC output is not valid for this run"
+    if reason:
+        message += f": {reason}"
+    return ValueError(f"{message}; rerun with force=True.")
+
+
+def _decode_instance_ids(values: Any) -> Any:
+    np = _import_numpy()
+    array = np.asarray(values)
+    if array.dtype.kind == "S":
+        return np.asarray([value.decode("utf-8") for value in array], dtype=str)
+    return array.astype(str)
+
+
+def _reconcile_cells_with_artifact(
+    zarr_path: Path,
+    *,
+    source_obs: Any,
+    instance_ids: Any,
+    spatial_um: Any,
+) -> tuple[Any, Any, Any, bool]:
+    """Align a rebuilt aggregate table to an existing artifact by instance ID."""
+    np = _import_numpy()
+    if not zarr_path.exists():
+        return source_obs, instance_ids, spatial_um, False
+    root = _zarr_open_group(zarr_path, "r")
+    if "instance_id" not in root:
+        return source_obs, instance_ids, spatial_um, False
+
+    artifact_ids = _decode_instance_ids(root["instance_id"][:])
+    current_ids = np.asarray(instance_ids, dtype=str)
+    if len(set(artifact_ids.tolist())) != len(artifact_ids):
+        raise _artifact_error("stored instance_id values are not unique")
+    if len(set(current_ids.tolist())) != len(current_ids):
+        raise _artifact_error("current instance_id values are not unique")
+    if set(artifact_ids.tolist()) != set(current_ids.tolist()):
+        missing = sorted(set(artifact_ids.tolist()) - set(current_ids.tolist()))[:5]
+        added = sorted(set(current_ids.tolist()) - set(artifact_ids.tolist()))[:5]
+        raise _artifact_error(
+            f"cell membership changed (missing current IDs={missing}, new current IDs={added})"
+        )
+
+    positions = {instance_id: index for index, instance_id in enumerate(current_ids)}
+    order = np.asarray([positions[instance_id] for instance_id in artifact_ids], dtype=int)
+    reordered_obs = source_obs.iloc[order].copy()
+    reordered_obs.index = artifact_ids
+    reordered_obs["instance_id"] = artifact_ids
+    reordered_spatial = np.asarray(spatial_um, dtype=float)[order]
+
+    if "spatial_um" in root:
+        artifact_spatial = np.asarray(root["spatial_um"][:], dtype=float)
+        if artifact_spatial.shape != reordered_spatial.shape or not np.allclose(
+            artifact_spatial,
+            reordered_spatial,
+            rtol=0.0,
+            atol=1e-6,
+            equal_nan=False,
+        ):
+            raise _artifact_error("cell coordinates changed after rebuilding SpatialData")
+
+    reordered = not np.array_equal(current_ids, artifact_ids)
+    if reordered:
+        print(
+            "[alignment-qc] reconciled rebuilt agg_cell_labels row order to existing "
+            "alignment artifact by instance_id",
+            flush=True,
+        )
+    return reordered_obs, artifact_ids, reordered_spatial, reordered
 
 
 def _initialize_or_validate_artifact(
@@ -631,7 +698,7 @@ def _initialize_or_validate_artifact(
             or str(root.attrs.get("settings_hash", "")) != expected_hash
             or list(root.attrs.get("channels", [])) != aliases
         ):
-            raise _artifact_error()
+            raise _artifact_error("artifact schema, settings, or channel order changed")
     root.attrs.update(
         {
             "schema_version": ALIGNMENT_QC_SCHEMA_VERSION,
@@ -653,7 +720,7 @@ def _initialize_or_validate_artifact(
         if existing.shape != encoded_ids.shape or not np.array_equal(
             existing.astype(str), encoded_ids.astype(str)
         ):
-            raise _artifact_error()
+            raise _artifact_error("ordered instance_id values do not match")
     else:
         _replace_zarr_array(
             root,
@@ -672,7 +739,7 @@ def _initialize_or_validate_artifact(
         "cell_metrics" not in root
         or any(name not in root["cell_metrics"] for name in METRIC_NAMES)
     ):
-        raise _artifact_error()
+        raise _artifact_error("completed channels are missing stored cell metric arrays")
     metrics = _require_metric_arrays(root, cell_count=len(instance_ids), channel_count=len(aliases))
     return root, metrics
 
@@ -930,8 +997,6 @@ def run_alignment_qc(
     source_obs, instance_ids, spatial_um = _cell_observations(
         sdata.tables["agg_cell_labels"]
     )
-    x_level = spatial_um[:, 0] / pixel_x
-    y_level = spatial_um[:, 1] / pixel_y
 
     completed = set(int(value) for value in (manifest or {}).get("completed_indices", []))
     expected_indices = set(range(len(aliases)))
@@ -954,6 +1019,16 @@ def run_alignment_qc(
         if return_sdata:
             result["sdata"] = sdata
         return result
+
+    if not force:
+        source_obs, instance_ids, spatial_um, _cells_reordered = _reconcile_cells_with_artifact(
+            paths["zarr_path"],
+            source_obs=source_obs,
+            instance_ids=instance_ids,
+            spatial_um=spatial_um,
+        )
+    x_level = spatial_um[:, 0] / pixel_x
+    y_level = spatial_um[:, 1] / pixel_y
 
     print("[alignment-qc] preflighting configured images", flush=True)
     scaling_by_alias: dict[str, dict[str, float]] = {}

@@ -203,6 +203,9 @@ Artifacts are written under the slide-local `alignment_qc/` directory, and only 
 labels, tables, shapes, and transformations are not rewritten. Install OpenCV in the SpatialData
 environment with `pip install -e '.[alignment-qc]'`. The read-only validation notebook uses the
 same production helpers and supports whole-slide and micron-coordinate zoom inspection.
+After the canonical store is rebuilt from the same raster labels, alignment QC can restore its
+additive table from completed external artifacts by reconciling aggregate-table rows explicitly
+by `instance_id`; restoration is rejected if cell membership or micron coordinates changed.
 
 ### Tumor annotation and PerturbView decoding
 

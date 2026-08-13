@@ -329,6 +329,54 @@ def test_sampling_and_pyramid_resolution_helpers():
     np.testing.assert_allclose(sampled, [12.0])
 
 
+def test_reconcile_rebuilt_cells_by_instance_id(monkeypatch, tmp_path: Path):
+    obs = pd.DataFrame(
+        {"instance_id": ["7", "1"], "region": ["cell_labels", "cell_labels"]},
+        index=["7", "1"],
+    )
+    spatial = np.array([[7.0, 8.0], [1.0, 2.0]])
+    root = {
+        "instance_id": np.array([b"1", b"7"]),
+        "spatial_um": np.array([[1.0, 2.0], [7.0, 8.0]]),
+    }
+
+    monkeypatch.setattr(alignment_module, "_zarr_open_group", lambda path, mode: root)
+    zarr_path = tmp_path / "alignment_qc.zarr"
+    zarr_path.mkdir()
+    reordered_obs, reordered_ids, reordered_spatial, reordered = (
+        alignment_module._reconcile_cells_with_artifact(
+            zarr_path,
+            source_obs=obs,
+            instance_ids=np.array(["7", "1"]),
+            spatial_um=spatial,
+        )
+    )
+
+    assert reordered is True
+    assert reordered_ids.tolist() == ["1", "7"]
+    assert reordered_obs.index.tolist() == ["1", "7"]
+    np.testing.assert_allclose(reordered_spatial, [[1.0, 2.0], [7.0, 8.0]])
+
+
+def test_reconcile_rebuilt_cells_rejects_coordinate_changes(monkeypatch, tmp_path: Path):
+    obs = pd.DataFrame({"instance_id": ["1"]}, index=["1"])
+    root = {
+        "instance_id": np.array([b"1"]),
+        "spatial_um": np.array([[1.0, 2.0]]),
+    }
+    monkeypatch.setattr(alignment_module, "_zarr_open_group", lambda path, mode: root)
+    zarr_path = tmp_path / "alignment_qc.zarr"
+    zarr_path.mkdir()
+
+    with pytest.raises(ValueError, match="cell coordinates changed"):
+        alignment_module._reconcile_cells_with_artifact(
+            zarr_path,
+            source_obs=obs,
+            instance_ids=np.array(["1"]),
+            spatial_um=np.array([[10.0, 20.0]]),
+        )
+
+
 def test_run_alignment_qc_adds_only_zncc_table(monkeypatch, tmp_path: Path):
     config = load_config(_write_config(tmp_path))
     slide = get_slide_config(config, "SLIDE-A")

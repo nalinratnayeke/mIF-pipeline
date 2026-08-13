@@ -130,6 +130,7 @@ Important config rules:
 - keep `alignment_qc` optional and explicit-only; configs without the block must retain their current resolved behavior
 - keep alignment channel selection alias-only and ordered by `alignment_qc.channels`; do not migrate channel maps or infer AF/imaging metadata
 - keep alignment QC ZNCC-only and pre-alignment; do not add warping, displacement, thresholds, or cell filtering without an explicit design change
+- when restoring alignment QC after a canonical-store rebuild, reconcile completed artifacts to `agg_cell_labels` explicitly by instance ID and verify stored micron coordinates before reuse
 - treat the ZNCC configuration and schema as the first alignment-QC format; do not add compatibility handling for discarded prototypes
 
 The `setup` block may also define post-generation refinement rules:
