@@ -264,9 +264,21 @@ When the pipeline behavior changes materially:
 - update this `AGENTS.md`
 - prefer adding a durable markdown explanation instead of relying on notebook memory
 
+For all InstanSeg inference, nucleus/cell reconciliation, watershed, dataset-loading, or
+training work, also maintain `METHODS_INSTANSEG.md`:
+
+- read it before changing InstanSeg behavior or continuing an InstanSeg experiment
+- append a dated development-log entry for every material experiment, diagnostic, failure,
+  environment change, or training attempt, including negative and provisional results
+- update its publication-style methods only when a major persistent behavior or adopted
+  protocol changes; do not present exploratory notebook behavior as production methodology
+- record software distribution versions and source commits separately when they differ, and
+  keep production, fork-only, and experimental status explicit
+
 ## Continuation Guidance
 
 - Read `README.md` for the public workflow.
 - Read `AGENTS.md` for implementation guardrails.
 - Read `METHODS.md` for the rationale behind the current design.
+- Read `METHODS_INSTANSEG.md` before InstanSeg inference, reconciliation, or training work.
 - Ignore archived files under `old/` and `prototyping/Old/` unless the user explicitly asks to revive them.

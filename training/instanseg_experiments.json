@@ -1,0 +1,86 @@
+{
+  "schema_version": 1,
+  "defaults": {
+    "training_root": "/data1/lowes/ratnayn/Data/instanseg",
+    "dataset": "segmentation",
+    "target_segmentation": "NC",
+    "channel_invariant": true,
+    "batch_size": 3,
+    "num_workers": 8,
+    "num_epochs": 500,
+    "length_of_epoch": 3000,
+    "learning_rate": 0.001,
+    "hotstart_training": 10,
+    "rng_seed": 42
+  },
+  "experiments": [
+    {
+      "name": "cpdmi_050_t256_w128_heavy",
+      "ready": true,
+      "purpose": "Reference-resolution retraining control for separating resolution effects from trainer and dataset effects.",
+      "source_dataset": "[CPDMI_2023]",
+      "requested_pixel_size": 0.5,
+      "tile_size": 256,
+      "window_size": 128,
+      "augmentation_type": "heavy",
+      "weight": false,
+      "dataset_channel_drop_probabilities": null
+    },
+    {
+      "name": "cpdmi_0325_t256_w128_heavy",
+      "ready": true,
+      "purpose": "Primary CPDMI-only 0.325-um baseline using the published-style crop, window, batch, and update schedule.",
+      "source_dataset": "[CPDMI_2023]",
+      "requested_pixel_size": 0.325,
+      "tile_size": 256,
+      "window_size": 128,
+      "augmentation_type": "heavy",
+      "weight": false,
+      "dataset_channel_drop_probabilities": null
+    },
+    {
+      "name": "cpdmi_0325_t384_w128_heavy",
+      "ready": true,
+      "purpose": "Isolate the larger physical crop field while retaining the established loss and validation window.",
+      "source_dataset": "[CPDMI_2023]",
+      "requested_pixel_size": 0.325,
+      "tile_size": 384,
+      "window_size": 128,
+      "augmentation_type": "heavy",
+      "weight": false,
+      "dataset_channel_drop_probabilities": null
+    },
+    {
+      "name": "cpdmi_tissuenet_0325_t256_w128_heavy_drop",
+      "ready": true,
+      "purpose": "Mixed-data test matched to the CPDMI heavy baseline while overriding suppression to 0.3 for CPDMI and 0.05 for TissueNet.",
+      "source_dataset": "[CPDMI_2023,TissueNet]",
+      "requested_pixel_size": 0.325,
+      "tile_size": 256,
+      "window_size": 128,
+      "augmentation_type": "heavy",
+      "weight": true,
+      "length_of_epoch": 6000,
+      "dataset_channel_drop_probabilities": {
+        "CPDMI_2023": 0.3,
+        "TissueNet": 0.05
+      }
+    },
+    {
+      "name": "cpdmi_tissuenet_0325_t384_w128_heavy_drop",
+      "ready": true,
+      "purpose": "Mixed-data larger-tile comparison matched to the 256-tile heavy model, with suppression at 0.3 for CPDMI and 0.05 for TissueNet.",
+      "source_dataset": "[CPDMI_2023,TissueNet]",
+      "requested_pixel_size": 0.325,
+      "tile_size": 384,
+      "window_size": 128,
+      "augmentation_type": "heavy",
+      "weight": true,
+      "length_of_epoch": 6000,
+      "dataset_channel_drop_probabilities": {
+        "CPDMI_2023": 0.3,
+        "TissueNet": 0.05
+      }
+    }
+  ]
+}

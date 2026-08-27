@@ -6,3 +6,9 @@ dist/
 *.egg-info/
 .ipynb_checkpoints/
 *.Zone.Identifier
+
+# Large, reproducible notebook-generated experimental artifacts.
+/experimental_data/**/*.ome.tif
+/experimental_data/**/*.tiff
+/experimental_data/**/*.npz
+/experimental_data/**/*.csv

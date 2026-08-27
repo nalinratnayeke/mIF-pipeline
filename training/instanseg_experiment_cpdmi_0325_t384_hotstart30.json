@@ -1,0 +1,31 @@
+{
+  "schema_version": 1,
+  "defaults": {
+    "training_root": "/data1/lowes/ratnayn/Data/instanseg",
+    "dataset": "segmentation",
+    "target_segmentation": "NC",
+    "channel_invariant": true,
+    "multihead": true,
+    "batch_size": 3,
+    "num_workers": 8,
+    "num_epochs": 500,
+    "length_of_epoch": 3000,
+    "learning_rate": 0.001,
+    "hotstart_training": 30,
+    "rng_seed": 42
+  },
+  "experiments": [
+    {
+      "name": "cpdmi_0325_t384_w128_heavy_multihead_hotstart30",
+      "ready": true,
+      "purpose": "Issue-43 ablation at 0.325 um/pixel: extend hot start from 10 to 30 epochs while retaining the 384-pixel tile, 128-pixel instance window, and default main losses.",
+      "source_dataset": "[CPDMI_2023]",
+      "requested_pixel_size": 0.325,
+      "tile_size": 384,
+      "window_size": 128,
+      "augmentation_type": "heavy",
+      "weight": false,
+      "dataset_channel_drop_probabilities": null
+    }
+  ]
+}

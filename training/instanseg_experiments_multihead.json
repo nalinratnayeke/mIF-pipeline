@@ -1,0 +1,87 @@
+{
+  "schema_version": 1,
+  "defaults": {
+    "training_root": "/data1/lowes/ratnayn/Data/instanseg",
+    "dataset": "segmentation",
+    "target_segmentation": "NC",
+    "channel_invariant": true,
+    "multihead": true,
+    "batch_size": 3,
+    "num_workers": 8,
+    "num_epochs": 500,
+    "length_of_epoch": 3000,
+    "learning_rate": 0.001,
+    "hotstart_training": 10,
+    "rng_seed": 42
+  },
+  "experiments": [
+    {
+      "name": "cpdmi_050_t256_w128_heavy_multihead",
+      "ready": true,
+      "purpose": "Two-decoder reproduction control at the released fluorescence model's 0.5-um operating resolution.",
+      "source_dataset": "[CPDMI_2023]",
+      "requested_pixel_size": 0.5,
+      "tile_size": 256,
+      "window_size": 128,
+      "augmentation_type": "heavy",
+      "weight": false,
+      "dataset_channel_drop_probabilities": null
+    },
+    {
+      "name": "cpdmi_0325_t256_w128_heavy_multihead",
+      "ready": true,
+      "purpose": "Primary CPDMI-only 0.325-um model with the released two-decoder nucleus/cell architecture.",
+      "source_dataset": "[CPDMI_2023]",
+      "requested_pixel_size": 0.325,
+      "tile_size": 256,
+      "window_size": 128,
+      "augmentation_type": "heavy",
+      "weight": false,
+      "dataset_channel_drop_probabilities": null
+    },
+    {
+      "name": "cpdmi_0325_t384_w128_heavy_multihead",
+      "ready": true,
+      "purpose": "Two-decoder larger-tile CPDMI comparison at 0.325 um/pixel with the established 128-pixel instance window.",
+      "source_dataset": "[CPDMI_2023]",
+      "requested_pixel_size": 0.325,
+      "tile_size": 384,
+      "window_size": 128,
+      "augmentation_type": "heavy",
+      "weight": false,
+      "dataset_channel_drop_probabilities": null
+    },
+    {
+      "name": "cpdmi_tissuenet_0325_t256_w128_heavy_drop_multihead",
+      "ready": true,
+      "purpose": "Two-decoder mixed-data model at 0.325 um/pixel with equal dataset weighting and CPDMI/TissueNet channel suppression of 0.3/0.05.",
+      "source_dataset": "[CPDMI_2023,TissueNet]",
+      "requested_pixel_size": 0.325,
+      "tile_size": 256,
+      "window_size": 128,
+      "augmentation_type": "heavy",
+      "weight": true,
+      "length_of_epoch": 6000,
+      "dataset_channel_drop_probabilities": {
+        "CPDMI_2023": 0.3,
+        "TissueNet": 0.05
+      }
+    },
+    {
+      "name": "cpdmi_tissuenet_0325_t384_w128_heavy_drop_multihead",
+      "ready": true,
+      "purpose": "Two-decoder mixed-data larger-tile comparison matched to the 256-tile model with CPDMI/TissueNet channel suppression of 0.3/0.05.",
+      "source_dataset": "[CPDMI_2023,TissueNet]",
+      "requested_pixel_size": 0.325,
+      "tile_size": 384,
+      "window_size": 128,
+      "augmentation_type": "heavy",
+      "weight": true,
+      "length_of_epoch": 6000,
+      "dataset_channel_drop_probabilities": {
+        "CPDMI_2023": 0.3,
+        "TissueNet": 0.05
+      }
+    }
+  ]
+}
