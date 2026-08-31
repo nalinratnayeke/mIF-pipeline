@@ -10,6 +10,7 @@ from .config import (
     resolve_nimbus_channel_entries,
 )
 from .alignment_qc import _alignment_paths
+from .instanseg_wsi import configuration_fingerprint, inspect_mask_tiff, manifest_path, read_json
 
 
 def _import_tifffile():
@@ -73,17 +74,49 @@ def qc_slide(config: Union[dict[str, Any], str, Path], slide_id: str) -> dict[st
         str(expected_nuclear_masks[0]) if expected_nuclear_masks else "no mask_export configured",
     )
 
-    if full_path is not None and full_path.exists() and expected_cell_masks and expected_cell_masks[0].exists():
+    target_shape = None
+    if full_path is not None and full_path.exists():
         tifffile = _import_tifffile()
         with tifffile.TiffFile(str(full_path)) as handle:
             target_shape = tuple(int(value) for value in handle.pages[0].shape[-2:])
-        with tifffile.TiffFile(str(expected_cell_masks[0])) as handle:
-            mask_shape = tuple(int(value) for value in handle.pages[0].shape[-2:])
-        add_check(
-            "mask_shape_matches_canvas",
-            mask_shape == target_shape,
-            f"mask_shape={mask_shape}, target_shape={target_shape}",
-        )
+    for name, paths in (("cell", expected_cell_masks), ("nuclear", expected_nuclear_masks)):
+        if not paths or not paths[0].exists():
+            continue
+        try:
+            details = inspect_mask_tiff(
+                paths[0], expected_shape=target_shape, scan_maximum=False
+            )
+            add_check(f"{name}_mask_shape_matches_canvas", True, f"shape={details['shape']}")
+            add_check(f"{name}_mask_dtype_uint32", details["dtype"] == "uint32", details["dtype"])
+            add_check(f"{name}_mask_is_tiled", details["is_tiled"], f"tile={details['tile']}")
+        except (OSError, TypeError, ValueError) as exc:
+            add_check(f"{name}_mask_valid_tiff", False, f"{type(exc).__name__}: {exc}")
+
+    mode = str(instanseg_block.get("mode", "medium")).strip().lower()
+    if mode == "wsi_global" and mask_export:
+        completion_path = manifest_path(Path(mask_export["mask_dir"]), slide_id)
+        manifest_ok = False
+        detail = str(completion_path)
+        try:
+            manifest = read_json(completion_path)
+            if manifest is not None:
+                request = manifest.get("request") or {}
+                fingerprint = configuration_fingerprint(request)
+                manifest_ok = (
+                    manifest.get("schema_version") == 1
+                    and manifest.get("status") == "complete"
+                    and manifest.get("configuration_fingerprint") == fingerprint
+                    and request.get("slide_id") == slide_id
+                    and request.get("mode") == "wsi_global"
+                    and list(manifest.get("native_shape", [])) == list(target_shape or [])
+                )
+                detail = (
+                    f"status={manifest.get('status')}, "
+                    f"fingerprint={manifest.get('configuration_fingerprint')}"
+                )
+        except (OSError, TypeError, ValueError) as exc:
+            detail = f"{type(exc).__name__}: {exc}"
+        add_check("instanseg_wsi_manifest_complete", manifest_ok, detail)
 
     if nimbus_block.get("enabled", False):
         output_dir = Path(nimbus_block["output_dir"])

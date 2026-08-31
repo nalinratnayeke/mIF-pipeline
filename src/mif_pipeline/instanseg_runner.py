@@ -3,7 +3,21 @@ from __future__ import annotations
 from pathlib import Path
 from typing import Any, Union
 
-from .config import ensure_config, get_slide_config, resolve_block_aliases
+from .config import ensure_config, get_slide_config, normalize_instanseg_mode, resolve_block_aliases
+from .instanseg_wsi import (
+    MANIFEST_SCHEMA_VERSION,
+    completed_manifest_matches,
+    compatible_work_zarr,
+    configuration_fingerprint,
+    export_resolved_zarr,
+    instanseg_provenance,
+    manifest_path,
+    record_work_zarr,
+    remove_work,
+    source_identity,
+    work_paths,
+    write_json_atomic,
+)
 
 
 def _import_instanseg():
@@ -97,12 +111,7 @@ def _read_selected_full_merge_channels(
 
 
 def _instanseg_mode(instanseg_block: dict[str, Any]) -> str:
-    mode = str(instanseg_block.get("mode", "medium")).strip().lower()
-    if mode != "medium":
-        raise ValueError(
-            f"Unsupported InstanSeg mode {mode!r}. The active pipeline now supports only 'medium'."
-        )
-    return mode
+    return normalize_instanseg_mode(instanseg_block.get("mode"))
 
 
 def _collect_eval_kwargs(instanseg_block: dict[str, Any]) -> dict[str, Any]:
@@ -191,6 +200,320 @@ def _write_mask_tiffs(
     }
 
 
+def _native_shape(ome_path: Path) -> tuple[int, int]:
+    tifffile = _import_tifffile()
+    with tifffile.TiffFile(str(ome_path)) as handle:
+        return tuple(int(value) for value in handle.series[0].levels[0].shape[-2:])
+
+
+def _wsi_settings(
+    instanseg_block: dict[str, Any],
+    *,
+    aliases: list[str],
+    indices: list[int],
+) -> dict[str, Any]:
+    reference_alias = str(instanseg_block.get("reference_channel") or aliases[0])
+    if reference_alias not in aliases:
+        raise ValueError(
+            f"InstanSeg reference_channel {reference_alias!r} must be one of the selected channels."
+        )
+    return {
+        "tile_size": int(instanseg_block.get("tile_size", 2048)),
+        "overlap": int(instanseg_block.get("overlap", 80)),
+        "detection_size": int(instanseg_block.get("detection_size", 20)),
+        "batch_size": int(instanseg_block.get("batch_size", 1)),
+        "normalization_percentiles": [
+            float(value)
+            for value in instanseg_block.get("normalization_percentiles", [0.1, 99.9])
+        ],
+        "reference_channel": reference_alias,
+        "reference_channel_id": int(indices[aliases.index(reference_alias)]),
+        "resolve_cell_and_nucleus": True,
+        "resolution_method": str(
+            instanseg_block.get("resolution_method", "watershed")
+        ).strip().lower(),
+        "allow_unnucleated_cells": bool(
+            instanseg_block.get("allow_unnucleated_cells", True)
+        ),
+        "cleanup_fragments": bool(instanseg_block.get("cleanup_fragments", True)),
+        "seed_threshold": float(instanseg_block.get("seed_threshold", 0.6)),
+    }
+
+
+def _wsi_request(
+    *,
+    slide_id: str,
+    ome_path: Path,
+    model: str,
+    pixel_size_um: float,
+    aliases: list[str],
+    indices: list[int],
+    settings: dict[str, Any],
+    native_shape: tuple[int, int],
+    instanseg_source: dict[str, Any],
+    mask_export: dict[str, Any],
+) -> dict[str, Any]:
+    return {
+        "slide_id": slide_id,
+        "mode": "wsi_global",
+        "source": source_identity(ome_path),
+        "model": model,
+        "pixel_size_um": float(pixel_size_um),
+        "channels": list(aliases),
+        "channel_indices": list(indices),
+        "native_shape": list(native_shape),
+        "wsi": dict(settings),
+        "instanseg": dict(instanseg_source),
+        "mask_export": dict(mask_export),
+    }
+
+
+def _run_medium(
+    result: dict[str, Any],
+    *,
+    slide: dict[str, Any],
+    ome_path: Path,
+    instanseg_block: dict[str, Any],
+    instanseg_indices: list[int],
+    inst,
+) -> dict[str, Any]:
+    eval_kwargs = _collect_eval_kwargs(instanseg_block)
+    result["eval_kwargs"] = dict(eval_kwargs)
+    planes = instanseg_block.get("planes") or {}
+    nuclei_plane = int(planes.get("nuclei_plane", 0))
+    cells_plane = int(planes.get("cells_plane", 1))
+    result["planes"] = {"nuclei_plane": nuclei_plane, "cells_plane": cells_plane}
+
+    image_array, pixel_size_read = _read_selected_full_merge_channels(
+        ome_path,
+        channel_indices=instanseg_indices,
+    )
+    pixel_size_for_eval = result["pixel_size_um"] if result["pixel_size_um"] is not None else pixel_size_read
+    result["read_image_pixel_size_um"] = pixel_size_read
+    print(
+        f"[instanseg] loaded selected channels from full_merge with pixel_size_um={pixel_size_read}; "
+        f"using {pixel_size_for_eval} for eval_medium_image(...)",
+        flush=True,
+    )
+    instances = inst.eval_medium_image(
+        image_array,
+        pixel_size=pixel_size_for_eval,
+        tile_size=result["tile_size"],
+        batch_size=result["batch_size"],
+        return_image_tensor=False,
+        **eval_kwargs,
+    )
+    instances_array = _coerce_instances_array(instances)
+    result["instances_shape"] = tuple(int(value) for value in instances_array.shape)
+    result.update(
+        _write_mask_tiffs(
+            slide,
+            ome_path=ome_path,
+            instances_array=instances_array,
+            nuclei_plane=nuclei_plane,
+            cells_plane=cells_plane,
+        )
+    )
+    result["status"] = "written"
+    return result
+
+
+def _run_wsi_global(
+    result: dict[str, Any],
+    *,
+    slide: dict[str, Any],
+    ome_path: Path,
+    instanseg_block: dict[str, Any],
+    instanseg_aliases: list[str],
+    instanseg_indices: list[int],
+    force: bool,
+) -> dict[str, Any]:
+    cell_path, nuclear_path = _mask_output_paths(slide)
+    mask_export = slide.get("mask_export") or {}
+    mask_dir = cell_path.parent
+    paths = work_paths(mask_dir, slide["slide_id"])
+    completion_path = manifest_path(mask_dir, slide["slide_id"])
+    native_shape = _native_shape(ome_path)
+    settings = _wsi_settings(
+        instanseg_block,
+        aliases=instanseg_aliases,
+        indices=instanseg_indices,
+    )
+
+    InstanSeg = _import_instanseg()
+    if not hasattr(InstanSeg, "eval_whole_slide_image_global_normalization"):
+        raise RuntimeError(
+            "instanseg.mode=wsi_global requires an InstanSeg installation with "
+            "eval_whole_slide_image_global_normalization(). Install the patched fork "
+            "into this environment (editable --no-deps is supported)."
+        )
+    source = instanseg_provenance()
+    request = _wsi_request(
+        slide_id=slide["slide_id"],
+        ome_path=ome_path,
+        model=result["model"],
+        pixel_size_um=result["pixel_size_um"],
+        aliases=instanseg_aliases,
+        indices=instanseg_indices,
+        settings=settings,
+        native_shape=native_shape,
+        instanseg_source=source,
+        mask_export={
+            "cell_path": str(cell_path),
+            "nuclear_path": str(nuclear_path),
+            "tile": [int(value) for value in mask_export.get("tile", [256, 256])],
+            "compression": mask_export.get("compression", "zlib"),
+            "bigtiff": bool(mask_export.get("bigtiff", True)),
+        },
+    )
+    fingerprint = configuration_fingerprint(request)
+    result.update(
+        {
+            "wsi_settings": settings,
+            "native_shape": list(native_shape),
+            "work_zarr_path": str(paths["zarr"]),
+            "manifest_path": str(completion_path),
+            "configuration_fingerprint": fingerprint,
+            "instanseg_source": source,
+        }
+    )
+
+    compatible, reason = completed_manifest_matches(
+        completion_path,
+        request,
+        cell_path=cell_path,
+        nuclear_path=nuclear_path,
+    )
+    result["existing_manifest"] = reason
+    if compatible and not force:
+        # Covers a process interruption after manifest commit but before the
+        # final recovery-directory cleanup.
+        remove_work(paths)
+        result["status"] = "skipped"
+        print(f"[instanseg] skipping {slide['slide_id']}: {reason}", flush=True)
+        return result
+
+    if force:
+        remove_work(paths)
+    recovered = None if force else compatible_work_zarr(paths, request)
+    public_artifacts = [path for path in (cell_path, nuclear_path, completion_path) if path.exists()]
+    if recovered is None and public_artifacts and not force:
+        raise FileExistsError(
+            "Existing WSI masks do not have a compatible completed manifest. "
+            "Pass --force to replace legacy or incompatible artifacts. Found: "
+            + ", ".join(str(path) for path in public_artifacts)
+        )
+    if recovered is None and paths["root"].exists() and not force:
+        raise ValueError(
+            f"Incomplete or unverified WSI recovery work exists at {paths['root']}. "
+            "Pass --force to discard it."
+        )
+
+    if recovered is None:
+        inst = InstanSeg(result["model"], verbosity=1)
+        paths["root"].mkdir(parents=True, exist_ok=True)
+        inst.prediction_tag = result["prediction_tag"]
+        print(
+            f"[instanseg] running global-normalized WSI inference: {settings}",
+            flush=True,
+        )
+        try:
+            observed_path = Path(
+                inst.eval_whole_slide_image_global_normalization(
+                    str(ome_path),
+                    channel_ids=instanseg_indices,
+                    pixel_size=result["pixel_size_um"],
+                    normalization_percentiles=settings["normalization_percentiles"],
+                    reference_channel_id=settings["reference_channel_id"],
+                    tile_size=settings["tile_size"],
+                    overlap=settings["overlap"],
+                    detection_size=settings["detection_size"],
+                    output_path=paths["zarr"],
+                    overwrite=False,
+                    batch_size=settings["batch_size"],
+                    resolve_cell_and_nucleus=True,
+                    resolution_method=settings["resolution_method"],
+                    allow_unnucleated_cells=settings["allow_unnucleated_cells"],
+                    cleanup_fragments=settings["cleanup_fragments"],
+                    seed_threshold=settings["seed_threshold"],
+                )
+            )
+            if observed_path.resolve() != paths["zarr"].resolve():
+                raise RuntimeError(
+                    f"InstanSeg returned unexpected WSI output {observed_path}; expected {paths['zarr']}."
+                )
+            zarr_details = record_work_zarr(paths, request)
+        except BaseException:
+            # Only a validated resolved Zarr is restartable. Partial inference
+            # state must not force the next normal retry into --force mode.
+            remove_work(paths)
+            raise
+        result["reused_work_zarr"] = False
+    else:
+        zarr_details = recovered
+        result["reused_work_zarr"] = True
+        print(f"[instanseg] reusing validated resolved Zarr at {paths['zarr']}", flush=True)
+
+    if source_identity(ome_path) != request["source"]:
+        raise RuntimeError(
+            "The merged OME-TIFF changed during InstanSeg processing; refusing to export "
+            "masks from stale WSI work. Rerun with --force after the source is stable."
+        )
+
+    tile = tuple(int(value) for value in mask_export.get("tile", [256, 256]))
+    print(
+        f"[instanseg] streaming resolved labels to native shape {native_shape} with tile={tile}",
+        flush=True,
+    )
+    tiff_details = export_resolved_zarr(
+        paths["zarr"],
+        cell_path=cell_path,
+        nuclear_path=nuclear_path,
+        target_shape=native_shape,
+        tile_shape=tile,
+        compression=mask_export.get("compression", "zlib"),
+        bigtiff=bool(mask_export.get("bigtiff", True)),
+    )
+    manifest = {
+        "schema_version": MANIFEST_SCHEMA_VERSION,
+        "status": "complete",
+        "configuration_fingerprint": fingerprint,
+        "request": request,
+        "normalization": zarr_details["normalization"],
+        "resolver": {
+            "settings": zarr_details["resolution"],
+            "summary": zarr_details["resolution_summary"],
+            "validation": zarr_details["validation"],
+        },
+        "model_zarr": zarr_details,
+        "native_shape": list(native_shape),
+        "native_tiffs": tiff_details,
+    }
+    write_json_atomic(completion_path, manifest)
+    compatible, reason = completed_manifest_matches(
+        completion_path,
+        request,
+        cell_path=cell_path,
+        nuclear_path=nuclear_path,
+    )
+    if not compatible:
+        raise RuntimeError(f"Completed InstanSeg manifest did not validate: {reason}")
+    remove_work(paths)
+    result.update(
+        {
+            "status": "written",
+            "zarr": zarr_details,
+            "native_tiffs": tiff_details,
+            "work_zarr_deleted": not paths["zarr"].exists(),
+            "target_shape": list(native_shape),
+            "cell_mask_shape": list(native_shape),
+            "nuclear_mask_shape": list(native_shape),
+            "mask_dtype": "uint32",
+        }
+    )
+    return result
+
+
 def run_instanseg(
     config: Union[dict[str, Any], str, Path],
     slide_id: str,
@@ -198,7 +521,7 @@ def run_instanseg(
     force: bool = False,
     dry_run: bool = False,
 ) -> dict[str, Any]:
-    """Run medium-image InstanSeg inference and write full-resolution mask TIFFs."""
+    """Run configured InstanSeg inference and write full-resolution mask TIFFs."""
     config = ensure_config(config)
     slide = get_slide_config(config, slide_id)
     full_merge = slide.get("full_merge") or {}
@@ -242,30 +565,27 @@ def run_instanseg(
         },
         "dry_run": dry_run,
     }
+    if mode == "wsi_global":
+        result["wsi_settings"] = _wsi_settings(
+            instanseg_block,
+            aliases=instanseg_aliases,
+            indices=instanseg_indices,
+        )
+        result["manifest_path"] = str(manifest_path(cell_mask_path.parent, slide_id))
+        result["work_zarr_path"] = str(work_paths(cell_mask_path.parent, slide_id)["zarr"])
     if dry_run:
         result["status"] = "planned"
         return result
 
     if not ome_path.exists():
         raise FileNotFoundError(f"Full merge does not exist: {ome_path}")
-    if cell_mask_path.exists() and nuclear_mask_path.exists() and not force:
+    if mode == "medium" and cell_mask_path.exists() and nuclear_mask_path.exists() and not force:
         result["status"] = "skipped"
         print(
             f"[instanseg] skipping {slide_id}: mask outputs already exist at {cell_mask_path.parent} (force=False)",
             flush=True,
         )
         return result
-
-    InstanSeg = _import_instanseg()
-    inst = InstanSeg(result["model"], verbosity=1)
-    inst.prediction_tag = prediction_tag
-
-    eval_kwargs = _collect_eval_kwargs(instanseg_block)
-    result["eval_kwargs"] = dict(eval_kwargs)
-    planes = instanseg_block.get("planes") or {}
-    nuclei_plane = int(planes.get("nuclei_plane", 0))
-    cells_plane = int(planes.get("cells_plane", 1))
-    result["planes"] = {"nuclei_plane": nuclei_plane, "cells_plane": cells_plane}
 
     print(f"[instanseg] running {slide_id}", flush=True)
     print(
@@ -275,42 +595,34 @@ def run_instanseg(
     )
     print(f"[instanseg] prediction_tag={prediction_tag}", flush=True)
     print(f"[instanseg] channels={instanseg_aliases} indices={instanseg_indices}", flush=True)
-    print(f"[instanseg] eval_kwargs={eval_kwargs}", flush=True)
-
-    image_array, pixel_size_read = _read_selected_full_merge_channels(
-        ome_path,
-        channel_indices=instanseg_indices,
-    )
-    pixel_size_for_eval = result["pixel_size_um"] if result["pixel_size_um"] is not None else pixel_size_read
-    result["read_image_pixel_size_um"] = pixel_size_read
-    print(
-        f"[instanseg] loaded selected channels from full_merge with pixel_size_um={pixel_size_read}; "
-        f"using {pixel_size_for_eval} for eval_medium_image(...)",
-        flush=True,
-    )
-    instances = inst.eval_medium_image(
-        image_array,
-        pixel_size=pixel_size_for_eval,
-        tile_size=result["tile_size"],
-        batch_size=result["batch_size"],
-        return_image_tensor=False,
-        **eval_kwargs,
-    )
-    instances_array = _coerce_instances_array(instances)
-    result["instances_shape"] = tuple(int(value) for value in instances_array.shape)
-    result.update(
-        _write_mask_tiffs(
-            slide,
+    if mode == "wsi_global":
+        result = _run_wsi_global(
+            result,
+            slide=slide,
             ome_path=ome_path,
-            instances_array=instances_array,
-            nuclei_plane=nuclei_plane,
-            cells_plane=cells_plane,
+            instanseg_block=instanseg_block,
+            instanseg_aliases=instanseg_aliases,
+            instanseg_indices=instanseg_indices,
+            force=force,
         )
-    )
+    else:
+        InstanSeg = _import_instanseg()
+        inst = InstanSeg(result["model"], verbosity=1)
+        inst.prediction_tag = prediction_tag
+        eval_kwargs = _collect_eval_kwargs(instanseg_block)
+        print(f"[instanseg] eval_kwargs={eval_kwargs}", flush=True)
+        result = _run_medium(
+            result,
+            slide=slide,
+            ome_path=ome_path,
+            instanseg_block=instanseg_block,
+            instanseg_indices=instanseg_indices,
+            inst=inst,
+        )
 
-    result["status"] = "written"
-    print(
-        f"[instanseg] wrote masks cell={result['cell_mask_path']} nuclear={result['nuclear_mask_path']}",
-        flush=True,
-    )
+    if result["status"] == "written":
+        print(
+            f"[instanseg] wrote masks cell={result['cell_mask_path']} nuclear={result['nuclear_mask_path']}",
+            flush=True,
+        )
     return result

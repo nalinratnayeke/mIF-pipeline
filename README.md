@@ -4,7 +4,7 @@ Small, notebook-friendly pipeline for multiplex IF slides with explicit file art
 
 1. `setup`: generate channel maps
 2. `merge`: write one canonical `full_merge.ome.tif` per slide
-3. `instanseg`: run medium-mode InstanSeg and export whole-cell / nuclear mask TIFFs
+3. `instanseg`: run globally normalized WSI+watershed InstanSeg (or retained medium compatibility) and export whole-cell / nuclear mask TIFFs
 4. `nimbus-prepare`: compute shared normalization JSONs across a selected slide set
 5. `nimbus`: run Nimbus per slide using slide-local chunk folders
 6. `assemble-spatialdata`: import the file artifacts into the final SpatialData store
@@ -37,6 +37,19 @@ Active debugging notebooks live under [prototyping](/home/ratnayn/codex/mIF-pipe
 - [tumor_annotation_perturbview_decode.ipynb](prototyping/tumor_annotation_perturbview_decode.ipynb)
 - [cohort_tumor_decode_qc.ipynb](prototyping/cohort_tumor_decode_qc.ipynb)
 
+Recent InstanSeg comparison notebooks are under [notebooks](notebooks/):
+
+- [instanseg_compare_recent_models_cpdmi_validation.ipynb](notebooks/instanseg_compare_recent_models_cpdmi_validation.ipynb)
+- [experimental_instanseg_wsi_global_resolver_comparison.ipynb](notebooks/experimental_instanseg_wsi_global_resolver_comparison.ipynb)
+
+The training comparison discovers recent multihead checkpoints, freezes the 30-record CPDMI Validation subset from the
+saved combined dataset, and compares CPDMI-only and mixed CPDMI+TissueNet models with the public
+`fluorescence_nuclei_and_cells` v0.1.1 pretrained baseline. All models receive the same deterministic
+validation records and preprocessing; it is analysis-only and does not modify pipeline artifacts.
+The WSI resolver comparison is separately gated, uses only the regenerated half-crop and the exact
+production segmentation-channel order, and compares native versus watershed global resolution
+without creating a standalone unresolved artifact.
+
 Reference implementations and external snapshots live under [Reference](/home/ratnayn/codex/mIF-pipeline/Reference).
 
 For a fuller rationale and a paper-style description of the implemented workflow, see [METHODS.md](/home/ratnayn/codex/mIF-pipeline/METHODS.md).
@@ -49,7 +62,9 @@ Important points:
 
 - `full_merge` is the only persisted merged image artifact.
 - `instanseg.channels` is the segmentation channel subset.
-- Medium-mode InstanSeg tiling is configured through `instanseg.tile_size`; tile overlap is controlled internally by `eval_medium_image()` and `instanseg.overlap` is rejected.
+- `instanseg.mode` accepts `wsi_global` or `medium`; a missing mode remains `medium` for compatibility. The example and active full-slide prototype use `wsi_global`.
+- `wsi_global` computes fixed slide-level uint16 histogram percentiles, performs selected-channel tile inference without a whole-slide float allocation, stitches nuclei and cells independently, and reconciles the stitched slide with the global watershed resolver. It requires `resolve_cell_and_nucleus: true`; `resolution_method: native` is retained only for explicit comparison.
+- Medium-mode tiling is configured through `instanseg.tile_size`; `instanseg.overlap` is WSI-only because `eval_medium_image()` controls its own overlap.
 - `nimbus.channels` is the Nimbus channel subset.
 - `nimbus.output_dir` is always slide-local.
 - `nimbus.multislide` is no longer supported.
@@ -61,6 +76,22 @@ Important points:
 - `alignment_qc`, when present and enabled, selects an ordered set of existing `full_image`
   channels by exact alias and writes only alignment-QC-owned artifacts plus an additive
   `alignment_qc` SpatialData table. It does not infer or change channel metadata.
+
+Successful WSI inference first produces a resolved model-resolution Zarr in a hidden directory
+under `mask_export.mask_dir`. Native-resolution cell and nuclear TIFFs are then written tile by
+tile with one global nearest-neighbor coordinate transform. A completed manifest is committed
+last, after both TIFFs pass shape, dtype, tiling, and label-maximum checks. The temporary Zarr is
+deleted only then; if TIFF export fails it remains available for a compatible retry. In WSI mode,
+existing masks without a compatible manifest require `--force` and are never silently reused.
+
+The patched fork must be installed in the InstanSeg/Nimbus environment without replacing its
+runtime dependencies:
+
+```bash
+conda activate instanseg_nimbus
+python -m pip install --no-deps -e /data1/lowes/ratnayn/Codex/projects/instanseg
+python -c "import instanseg; from instanseg import InstanSeg; print(instanseg.__file__); print(hasattr(InstanSeg, 'eval_whole_slide_image_global_normalization'))"
+```
 
 The most important per-slide fields are:
 
@@ -300,7 +331,7 @@ The current pipeline shape reflects a few deliberate choices:
 - `full_merge.ome.tif` is the only persisted merged image artifact; `seg_merge` was removed for simplicity and storage efficiency.
 - `nimbus-prepare` replaced the older shared multislide Nimbus execution/output model so shared normalization can coexist with per-slide execution and per-slide recovery.
 - SpatialData assembly uses the validated `tiffslide`-based import path for the merged OME-TIFF because it behaved more reliably on large images than earlier alternatives.
-- InstanSeg remains a direct medium-mode stage rather than being folded into the SpatialData stage.
+- InstanSeg remains a direct file-artifact stage. Production full slides use global-normalized WSI inference and watershed reconciliation; medium mode remains available for existing configurations.
 - The shell wrapper stage name is `spatialdata`, but the CLI subcommand is `assemble-spatialdata`.
 
 The detailed rationale behind these decisions is documented in [METHODS.md](/home/ratnayn/codex/mIF-pipeline/METHODS.md).
@@ -319,11 +350,14 @@ The smoke tests avoid cluster data and focus on:
 - path resolution
 - dry-run payloads
 - stage boundary behavior
+- WSI resolved-Zarr recovery and manifest-last completion
+- exact rectangular/odd-size streaming nearest-neighbor mask export
+- paired TIFF shape, dtype, tiling, and QC checks
 - stubbed Nimbus execution
 - slide-local SpatialData path resolution
 
 Run them with:
 
 ```bash
-PYTHONPATH=src python -m pytest -q tests/test_smoke.py
+PYTHONPATH=src python -m pytest -q tests
 ```

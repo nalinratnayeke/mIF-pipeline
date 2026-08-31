@@ -15,13 +15,29 @@ full_merge:
   bigtiff: true
 
 instanseg:
-  channels: [R1_DAPI, R3_FITC_AF, R4_P19_POLYRAT, R4_GFP_POLY_AF488]
+  channels:
+    - R1_DAPI
+    - R4_P19_POLYRAT
+    - R4_GFP_POLY_AF488
+    - R6_CD45_CST_AF647
+    - R6_PANCK_AE1_AE3_750
+    - R12_CD31_D8V9E_AF750
+    - R7_NAK_ATPASE_555
+    - R8_F480_D2S9R_555
+    - R9_CD68_E3O7V_488
+    - R12_CD3E_E4T1B_AF555
   model: fluorescence_nuclei_and_cells
-  mode: medium
+  mode: wsi_global
   prediction_tag: _instanseg_prediction
-  tile_size: 2000
-  batch_size: 10
+  tile_size: 2048
+  overlap: 80
+  detection_size: 20
+  batch_size: 1
+  normalization_percentiles: [0.1, 99.9]
+  reference_channel: R1_DAPI
   resolve_cell_and_nucleus: true
+  resolution_method: watershed
+  allow_unnucleated_cells: true
   cleanup_fragments: true
   seed_threshold: 0.6
   planes:

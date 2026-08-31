@@ -120,14 +120,29 @@ The pipeline does not currently attempt to reconstruct a full microscope `Instru
 
 ### Execution mode
 
-Segmentation is performed with direct InstanSeg inference in forced `medium` mode. We intentionally did not switch to whole-slide InstanSeg orchestration or Harpy’s InstanSeg wrapper as the primary production segmentation path.
-
-This decision was made because the direct medium-mode workflow had already been validated against real slides and because it produced a simpler, more stable file-artifact handoff:
+Segmentation is performed through the direct InstanSeg API rather than through Harpy. The adopted
+full-slide mode is `wsi_global`; the prior `medium` mode remains supported for existing
+configurations and is still the default when `instanseg.mode` is absent. Both modes preserve the
+same simple file-artifact handoff:
 
 - merged OME-TIFF in
 - whole-cell and nuclear instance masks out
 
-The pipeline exposes `instanseg.tile_size` and `instanseg.batch_size` for medium-mode execution. It does not expose an overlap setting: `eval_medium_image()` determines its sliding-window overlap internally, so accepting an `instanseg.overlap` value would misleadingly imply that the pipeline can tune that behavior.
+WSI inference calculates exact uint16 histograms one selected channel at a time and derives one
+fixed pair of global percentile bounds per channel. Completely zero acquisition tiles in the
+reference channel are excluded, while zero pixels within acquired tiles remain part of the
+distribution. Spatial tiles select the configured channels before float32 conversion, apply the
+fixed transform, and run without tile-local normalization. Nuclear and cellular instances are
+stitched independently across the model-resolution slide.
+
+After stitching, the production resolver associates nuclei to cells by strict majority overlap,
+splits multiply associated cell territories with local nucleus-seeded watershed, preserves
+disconnected unseeded parent territory, and creates nucleus-shaped proxy cells for unmatched
+nuclei. Nuclear priority and final coordinated relabeling are validated globally before the
+resolved Zarr is accepted. `native` global resolution is retained only as an explicit comparison
+setting. WSI configuration exposes tile size, overlap, detection margin, batch size, normalization
+percentiles, reference-channel alias, and resolver settings. Medium mode continues to expose tile
+size and batch size only because `eval_medium_image()` controls its overlap internally.
 
 ### Channel subset selection
 
@@ -149,7 +164,20 @@ Operationally, this means the segmentation stage is still anchored in the native
 
 ### Mask export
 
-InstanSeg predictions may be generated at model resolution rather than full canvas resolution. For that reason, the exported label masks are always resized back to the full merged image canvas before being written. Label resizing is performed with nearest-neighbor semantics only so that integer instance IDs remain intact.
+The resolved WSI Zarr is a restartable intermediate rather than a successful-run deliverable.
+Nuclear and whole-cell planes are streamed independently into full-canvas tiled uint32 TIFFs. For
+each native output pixel, a global pixel-center nearest-neighbor mapping selects the corresponding
+model-resolution label, so tile boundaries cannot reset the coordinate transform and no complete
+native mask is allocated in memory. Both temporary TIFFs are checked for shape, dtype, tiling, and
+label maximum before they replace the public outputs.
+
+An atomic slide-level InstanSeg manifest is written last. It records the source identity,
+configuration fingerprint, selected aliases and source indices, InstanSeg import path/version/git
+revision, normalization bounds, resolver validation, Zarr geometry, and native TIFF properties.
+Only masks accompanied by a compatible completed manifest are skipped in WSI mode. If export
+fails, the validated model-resolution Zarr is retained for retry; it and its normalization sidecar
+are deleted after both TIFFs and the manifest validate. Medium-mode mask export retains the prior
+nearest-neighbor in-memory behavior for compatibility.
 
 The exported masks are written as tiled uint32 TIFFs:
 
@@ -373,7 +401,7 @@ The pipeline’s current design was shaped by repeated practical constraints enc
 - one canonical merged TIFF is simpler than maintaining two merge artifacts
 - explicit file handoffs are more robust than cross-environment object exchange
 - slide-local Nimbus outputs are easier to recover than shared multislide output trees
-- direct medium-mode InstanSeg was more stable than prematurely abstracting segmentation into a broader framework
+- direct InstanSeg file-artifact execution keeps both the adopted WSI path and retained medium compatibility independent of SpatialData
 - the `tiffslide`-based SpatialData import path behaved better on large merged images than earlier alternatives
 - raster labels are the source of truth; polygon layers are optional derivations
 
