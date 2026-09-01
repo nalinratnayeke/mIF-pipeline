@@ -15,6 +15,16 @@ VERSION_ROUND_RE = re.compile(r"_(\d+)(?:\.\d+){1,2}_R\d{3}_")
 COMMON_DYES = {"DAPI", "FITC", "TRITC", "CY3", "CY5", "CY7", "AF488", "AF555", "AF647", "AF750"}
 SPATIALDATA_AGGREGATION_MODES = ("mean", "sum")
 NIMBUS_NORMALIZATION_MODES = ("prepared", "per_slide")
+INSTANSEG_MODES = ("medium", "wsi_global")
+INSTANSEG_WSI_RESOLUTION_METHODS = ("native", "watershed")
+INSTANSEG_WSI_ONLY_KEYS = {
+    "overlap",
+    "detection_size",
+    "normalization_percentiles",
+    "reference_channel",
+    "resolution_method",
+    "allow_unnucleated_cells",
+}
 ALIGNMENT_QC_KEYS = {
     "enabled",
     "output_dir",
@@ -90,7 +100,10 @@ def load_config(config_path: Union[str, Path]) -> dict[str, Any]:
                 require_selection=False,
             )
             _validate_nimbus_block(slide.get("nimbus"))
-            _validate_instanseg_block(slide.get("instanseg"), slide_id=str(slide_id))
+            _validate_instanseg_block(
+                _deep_merge(config.get("instanseg") or {}, slide.get("instanseg") or {}),
+                slide_id=str(slide_id),
+            )
 
     config["_meta"] = {
         "config_path": str(path),
@@ -145,14 +158,89 @@ def _validate_nimbus_block(block: Any) -> None:
     )
 
 
-def _validate_instanseg_block(block: Any, *, slide_id: str | None = None) -> None:
-    if not isinstance(block, dict) or "overlap" not in block:
+def normalize_instanseg_mode(value: Any) -> str:
+    if value is None:
+        return "medium"
+    normalized = str(value).strip().lower()
+    if normalized not in INSTANSEG_MODES:
+        allowed = ", ".join(repr(mode) for mode in INSTANSEG_MODES)
+        raise ValueError(f"InstanSeg mode must be one of {allowed}; got {value!r}.")
+    return normalized
+
+
+def _validate_instanseg_block(
+    block: Any,
+    *,
+    slide_id: str | None = None,
+) -> None:
+    if not isinstance(block, dict):
         return
-    location = f"slides.{slide_id}.instanseg.overlap" if slide_id else "instanseg.overlap"
-    raise ValueError(
-        f"{location} is not supported in the medium-mode pipeline. "
-        "InstanSeg eval_medium_image() controls tile overlap internally; remove this setting."
-    )
+    location = f"slides.{slide_id}.instanseg" if slide_id else "instanseg"
+    mode = normalize_instanseg_mode(block.get("mode"))
+
+    channels = block.get("channels")
+    if channels is not None:
+        if not isinstance(channels, list) or not channels:
+            raise ValueError(f"{location}.channels must be a non-empty ordered alias list.")
+        aliases = [str(alias) for alias in channels]
+        if any(not alias.strip() for alias in aliases) or len(set(aliases)) != len(aliases):
+            raise ValueError(f"{location}.channels must contain unique, non-empty aliases.")
+
+    for key in ("tile_size", "batch_size"):
+        if key in block and (isinstance(block[key], bool) or int(block[key]) < 1):
+            raise ValueError(f"{location}.{key} must be a positive integer.")
+
+    if mode == "medium":
+        unsupported = sorted(INSTANSEG_WSI_ONLY_KEYS.intersection(block))
+        if unsupported:
+            if unsupported == ["overlap"]:
+                raise ValueError(
+                    f"{location}.overlap is not supported in medium mode. "
+                    "InstanSeg eval_medium_image() controls tile overlap internally; remove this setting."
+                )
+            raise ValueError(
+                f"{location} contains WSI-only settings in medium mode: "
+                + ", ".join(unsupported)
+                + ". eval_medium_image() controls overlap internally."
+            )
+        return
+
+    for key in ("overlap", "detection_size"):
+        if key in block and (isinstance(block[key], bool) or int(block[key]) < 0):
+            raise ValueError(f"{location}.{key} must be a non-negative integer.")
+    percentiles = block.get("normalization_percentiles", [0.1, 99.9])
+    if not isinstance(percentiles, (list, tuple)) or len(percentiles) != 2:
+        raise ValueError(f"{location}.normalization_percentiles must contain two numbers.")
+    lower, upper = (float(value) for value in percentiles)
+    if not 0 <= lower < upper <= 100:
+        raise ValueError(
+            f"{location}.normalization_percentiles must satisfy 0 <= lower < upper <= 100."
+        )
+    reference = block.get("reference_channel")
+    if reference is not None and (not isinstance(reference, str) or not reference.strip()):
+        raise ValueError(f"{location}.reference_channel must be a non-empty alias.")
+    if reference is not None and channels is not None and reference not in channels:
+        raise ValueError(f"{location}.reference_channel must also appear in {location}.channels.")
+    if block.get("resolve_cell_and_nucleus", True) is not True:
+        raise ValueError(
+            f"{location}.resolve_cell_and_nucleus must be true in wsi_global mode; "
+            "production outputs require coordinated nucleus/cell IDs."
+        )
+    method = str(block.get("resolution_method", "watershed")).strip().lower()
+    if method not in INSTANSEG_WSI_RESOLUTION_METHODS:
+        allowed = ", ".join(repr(value) for value in INSTANSEG_WSI_RESOLUTION_METHODS)
+        raise ValueError(f"{location}.resolution_method must be one of {allowed}.")
+    for key in ("allow_unnucleated_cells", "cleanup_fragments"):
+        if key in block and not isinstance(block[key], bool):
+            raise ValueError(f"{location}.{key} must be boolean.")
+    seed_threshold = float(block.get("seed_threshold", 0.6))
+    if not 0 <= seed_threshold <= 1:
+        raise ValueError(f"{location}.seed_threshold must satisfy 0 <= value <= 1.")
+    planes = block.get("planes") or {}
+    if int(planes.get("nuclei_plane", 0)) != 0 or int(planes.get("cells_plane", 1)) != 1:
+        raise ValueError(
+            f"{location}.planes must use nuclei_plane=0 and cells_plane=1 in wsi_global mode."
+        )
 
 
 def _validate_alignment_qc_block(

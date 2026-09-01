@@ -20,11 +20,17 @@ full_merge:
 instanseg:
   channels: [R0_DAPI, R0_PANCK, R0_CD45]
   model: fluorescence_nuclei_and_cells
-  mode: medium
+  mode: wsi_global
   prediction_tag: _instanseg_prediction
   tile_size: 2048
+  overlap: 80
+  detection_size: 20
   batch_size: 1
+  normalization_percentiles: [0.1, 99.9]
+  reference_channel: R0_DAPI
   resolve_cell_and_nucleus: true
+  resolution_method: watershed
+  allow_unnucleated_cells: true
   cleanup_fragments: true
   seed_threshold: 0.6
   planes:

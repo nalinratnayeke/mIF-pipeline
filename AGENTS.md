@@ -8,7 +8,7 @@ The current supported workflow is:
 
 1. `setup`: generate channel maps
 2. `merge`: write one canonical `full_merge.ome.tif` per slide
-3. `instanseg`: run direct medium-mode InstanSeg on the merged OME-TIFF and export whole-cell / nuclear masks
+3. `instanseg`: run direct global-normalized WSI+watershed InstanSeg (or retained medium compatibility) and export whole-cell / nuclear masks
 4. `nimbus-prepare`: compute shared normalization JSONs across a selected slide set
 5. `nimbus`: run Nimbus per slide using slide-local chunk folders
 6. `assemble-spatialdata`: build and finalize the canonical slide-local SpatialData store
@@ -234,11 +234,14 @@ import instanseg.inference_class as ic
 ic.TiffSlide = TiffSlide
 ```
 
-- Keep the pipeline on forced `medium` processing unless the user explicitly requests a different mode.
+- Support `wsi_global` and `medium`; missing mode remains `medium` for compatibility, while the example and active full-slide prototype use `wsi_global`.
 - Do not expose `instanseg.overlap` in the medium-mode config. `eval_medium_image()` controls sliding-window overlap internally; reject the unsupported setting instead of logging or silently ignoring it.
-- Do not make Zarr prediction output the primary segmentation artifact unless the user explicitly asks for that refactor.
+- In `wsi_global`, require coordinated global resolution. Watershed is the production default; native global resolution is explicit comparison behavior only.
+- Treat the resolved model-resolution Zarr as a temporary restart artifact. Retain it after export failure and delete it only after both canonical TIFFs and the manifest validate.
+- Do not silently reuse WSI masks without a compatible completed manifest; require `--force` for legacy or incompatible artifacts.
 - Export masks as full-resolution tiled uint32 TIFFs.
-- When resizing labels, preserve integer instance IDs with nearest-neighbor behavior only.
+- Stream WSI label export from bounded Zarr regions with one global pixel-center nearest-neighbor mapping; never allocate a complete native-resolution mask.
+- Keep the whole-cell and nuclear TIFF paths unchanged because Nimbus and SpatialData consume them directly.
 
 ### Merge writer
 
