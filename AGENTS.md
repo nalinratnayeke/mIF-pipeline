@@ -237,6 +237,8 @@ ic.TiffSlide = TiffSlide
 - Support `wsi_global` and `medium`; missing mode remains `medium` for compatibility, while the example and active full-slide prototype use `wsi_global`.
 - Do not expose `instanseg.overlap` in the medium-mode config. `eval_medium_image()` controls sliding-window overlap internally; reject the unsupported setting instead of logging or silently ignoring it.
 - In `wsi_global`, require coordinated global resolution. Watershed is the production default; native global resolution is explicit comparison behavior only.
+- Keep resolved fragment cleanup WSI/watershed-only, with standard 8-connected model-resolution labeling and one explicit min_size shared with tile postprocessing. Preserve resolver-emitted unnucleated cells inside cleanup; their inclusion is an explicit resolver policy.
+- Keep pre-cleanup watershed validation separate from final cleaned-artifact validation, and recompute final maxima. Work/manifest schema 2 must not silently reuse legacy artifacts. Seed 0.2 is provisional pending WSI_POST_RESOLUTION_CLEANUP.md acceptance gates.
 - Treat the resolved model-resolution Zarr as a temporary restart artifact. Retain it after export failure and delete it only after both canonical TIFFs and the manifest validate.
 - Do not silently reuse WSI masks without a compatible completed manifest; require `--force` for legacy or incompatible artifacts.
 - Export masks as full-resolution tiled uint32 TIFFs.

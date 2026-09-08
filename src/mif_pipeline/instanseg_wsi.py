@@ -9,8 +9,129 @@ from pathlib import Path
 from typing import Any, Iterator
 
 
-MANIFEST_SCHEMA_VERSION = 1
-WORK_SCHEMA_VERSION = 1
+MANIFEST_SCHEMA_VERSION = 2
+WORK_SCHEMA_VERSION = 2
+RESOLVED_SCHEMA_VERSION = 2
+
+
+def validate_resolver_metadata(details: dict[str, Any], request: dict[str, Any]) -> None:
+    """Check the persisted resolver contract without reopening a label raster."""
+    import numpy as np
+
+    if details.get("resolved_schema_version") != RESOLVED_SCHEMA_VERSION:
+        raise ValueError("Resolved WSI Zarr schema is incompatible; regenerate with the updated fork.")
+    expected = request["wsi"]
+    for key in ("resolution", "resolution_summary", "resolution_validation_before_cleanup",
+                "resolved_fragment_cleanup", "validation"):
+        if not isinstance(details.get(key), dict):
+            raise ValueError(f"Resolver metadata {key!r} must be an object.")
+    resolution = details.get("resolution") or {}
+    if resolution.get("method") != expected["resolution_method"]:
+        raise ValueError("Resolved WSI Zarr resolution method does not match the current request.")
+    policy = resolution.get("allow_unnucleated_cells")
+    if type(policy) is not bool or policy != expected["allow_unnucleated_cells"]:
+        raise ValueError("Resolved WSI Zarr unnucleated-cell policy is missing or incompatible.")
+    summary = details["resolution_summary"]
+    if summary.get("scope") != "before_cleanup":
+        raise ValueError("Resolution summary must describe the pre-cleanup output.")
+    for key in ("original_proxy_label_id_ranges", "original_unnucleated_label_id_ranges"):
+        if key not in summary:
+            raise ValueError(f"Original resolver range {key!r} is missing.")
+        span = summary[key]
+        if span is not None and (not isinstance(span, list) or len(span) != 2
+                or any(type(v) is not int for v in span) or not 0 < span[0] < span[1]):
+            raise ValueError(f"Original resolver range {key!r} is invalid.")
+    for key in ("policy_excluded_unnucleated_ids", "policy_excluded_unnucleated_pixels"):
+        if type(summary.get(key)) is not int or summary[key] < 0:
+            raise ValueError(f"Resolver policy exclusion count {key!r} is invalid.")
+    before = details.get("resolution_validation_before_cleanup") or {}
+    before_checks = (
+        "all_raw_nuclei_preserved", "one_final_cell_id_per_raw_nucleus",
+        "nuclear_cell_ids_agree", "all_proxy_cells_exact", "all_seed_markers_preserved",
+        "all_seeded_union_complete", "all_unseeded_parent_territory_preserved",
+    )
+    failed = [key for key in before_checks if before.get(key) is not True]
+    if failed:
+        raise ValueError("Pre-cleanup resolution validation failed: " + ", ".join(failed))
+    cleanup = details.get("resolved_fragment_cleanup") or {}
+    if (cleanup.get("schema_version") != 1 or cleanup.get("connectivity") != 8
+            or type(cleanup.get("enabled")) is not bool
+            or cleanup["enabled"] != expected["cleanup_resolved_fragments"]
+            or type(cleanup.get("min_size")) is not int
+            or cleanup["min_size"] != expected["min_size"]
+            or cleanup.get("strict_area_rule") != "component_pixels > min_size"
+            or not isinstance(cleanup.get("metrics"), dict)
+            or cleanup.get("unnucleated_policy") != "preserve_resolver_output"):
+        raise ValueError("Resolved fragment cleanup metadata is missing or incompatible.")
+    final = details.get("validation") or {}
+    checks = ["nuclear_cell_ids_agree", "all_proxy_cells_exact", "nuclear_ids_have_cells",
+              "unnucleated_policy_satisfied"]
+    if final.get("cleanup_checks_applied") is not cleanup["enabled"]:
+        raise ValueError("Final cleanup validation applicability is incompatible.")
+    if cleanup["enabled"]:
+        checks += ["no_small_nuclear_components", "all_nucleated_cell_components_anchored"]
+        if "all_raw_nuclei_preserved" in final:
+            raise ValueError("Final cleaned validation must not claim raw-nucleus preservation.")
+    failed = [key for key in checks if final.get(key) is not True]
+    if failed:
+        raise ValueError("Final resolved artifact validation failed: " + ", ".join(failed))
+    for key in ("final_nuclei", "final_cells", "nuclear_foreground_pixels", "cell_foreground_pixels"):
+        if type(final.get(key)) is not int or final[key] < 0:
+            raise ValueError(f"Final resolver count {key!r} is missing or invalid.")
+    if final["final_nuclei"] > final["final_cells"] or (
+        not policy and final["final_nuclei"] != final["final_cells"]
+    ):
+        raise ValueError("Final nuclear/cell counts contradict the resolver policy.")
+    maxima = details.get("max_label_by_plane")
+    if (not isinstance(maxima, list) or len(maxima) != 2
+            or any(type(v) is not int or not 0 <= v <= np.iinfo(np.uint32).max for v in maxima)):
+        raise ValueError(f"Resolved label maxima are not uint32-compatible: {maxima!r}.")
+    if final.get("max_label_by_plane") != maxima:
+        raise ValueError("Final scanned maxima disagree with Zarr metadata.")
+    metrics = cleanup["metrics"]
+    for key in ("before_nuclei", "before_cells", "after_nuclei", "after_cells",
+                "before_nuclear_foreground_pixels", "before_cell_foreground_pixels",
+                "after_nuclear_foreground_pixels", "after_cell_foreground_pixels",
+                "removed_nuclear_pixels", "total_removed_cell_pixels"):
+        if type(metrics.get(key)) is not int or metrics[key] < 0:
+            raise ValueError(f"Cleanup metric {key!r} is missing or invalid.")
+    for metric, count in (("after_nuclei", "final_nuclei"), ("after_cells", "final_cells"),
+                          ("after_nuclear_foreground_pixels", "nuclear_foreground_pixels"),
+                          ("after_cell_foreground_pixels", "cell_foreground_pixels")):
+        if metrics[metric] != final[count]:
+            raise ValueError(f"Cleanup metric {metric!r} disagrees with final validation.")
+    for compartment, removed in (("nuclear", "removed_nuclear_pixels"), ("cell", "total_removed_cell_pixels")):
+        if (metrics[f"before_{compartment}_foreground_pixels"]
+                - metrics[f"after_{compartment}_foreground_pixels"] != metrics[removed]):
+            raise ValueError(f"Cleanup {compartment} removal accounting is inconsistent.")
+
+
+def validate_manifest_metadata(manifest: dict[str, Any]) -> None:
+    """Validate version-2 completion metadata shared by restart and lightweight QC."""
+    if manifest.get("schema_version") != MANIFEST_SCHEMA_VERSION or manifest.get("status") != "complete":
+        raise ValueError("Manifest schema/status is incompatible.")
+    request = manifest["request"]
+    if request.get("mode") != "wsi_global":
+        raise ValueError("Manifest mode is not wsi_global.")
+    if manifest.get("configuration_fingerprint") != configuration_fingerprint(request):
+        raise ValueError("Manifest fingerprint does not match its recorded request.")
+    if manifest.get("native_shape") != request.get("native_shape"):
+        raise ValueError("Manifest native geometry does not match its recorded request.")
+    details = manifest["model_zarr"]
+    validate_resolver_metadata(details, request)
+    for name, plane in (("nuclear", 0), ("cell", 1)):
+        tiff = manifest["native_tiffs"][name]
+        if (tiff.get("shape") != request["native_shape"] or tiff.get("dtype") != "uint32"
+                or tiff.get("is_tiled") is not True
+                or tiff.get("max_label") != details["max_label_by_plane"][plane]):
+            raise ValueError(f"Manifest {name} TIFF metadata contradicts resolved output.")
+    resolver = manifest["resolver"]
+    for key, source in (("settings", "resolution"), ("summary", "resolution_summary"),
+                        ("validation", "validation"),
+                        ("validation_before_cleanup", "resolution_validation_before_cleanup"),
+                        ("fragment_cleanup", "resolved_fragment_cleanup")):
+        if resolver.get(key) != details.get(source):
+            raise ValueError(f"Manifest resolver {key!r} disagrees with model_zarr metadata.")
 
 
 def manifest_path(mask_dir: Path, slide_id: str) -> Path:
@@ -140,41 +261,33 @@ def validate_resolved_zarr(path: Path, request: dict[str, Any]) -> dict[str, Any
 
     wsi = attrs.get("wsi_settings") or {}
     expected_wsi = request["wsi"]
-    for key in ("tile_size", "overlap", "detection_size", "resolve_cell_and_nucleus", "resolution_method"):
+    for key in ("tile_size", "overlap", "detection_size", "resolve_cell_and_nucleus", "resolution_method", "min_size", "cleanup_resolved_fragments"):
         if wsi.get(key) != expected_wsi[key]:
             raise ValueError(f"Resolved WSI Zarr setting {key!r} does not match the current request.")
-    resolution = attrs.get("resolution") or {}
-    if resolution.get("method") != expected_wsi["resolution_method"]:
-        raise ValueError("Resolved WSI Zarr resolution method does not match the current request.")
-    if bool(resolution.get("allow_unnucleated_cells")) != expected_wsi["allow_unnucleated_cells"]:
-        raise ValueError("Resolved WSI Zarr unnucleated-cell policy does not match the current request.")
+    validate_resolver_metadata(attrs, request)
 
     normalization = attrs.get("normalization") or {}
     observed_percentiles = [float(value) for value in normalization.get("percentiles", [])]
     if observed_percentiles != expected_wsi["normalization_percentiles"]:
         raise ValueError("Resolved WSI Zarr normalization percentiles do not match the current request.")
-    validation = attrs.get("validation") or {}
-    required_true = (
-        "all_raw_nuclei_preserved",
-        "one_final_cell_id_per_raw_nucleus",
-        "nuclear_cell_ids_agree",
-        "all_proxy_cells_exact",
-    )
-    failed = [key for key in required_true if validation.get(key) is not True]
-    if failed:
-        raise ValueError("Resolved WSI Zarr failed resolver validation: " + ", ".join(failed))
     maxima = [int(value) for value in attrs.get("max_label_by_plane", [])]
     if len(maxima) != 2 or min(maxima) < 0 or max(maxima) > np.iinfo(np.uint32).max:
         raise ValueError(f"Resolved label maxima are not uint32-compatible: {maxima!r}.")
     return {
+        "resolved_schema_version": attrs["resolved_schema_version"],
+        "resolved_cleanup_wall_seconds": attrs.get("resolved_cleanup_wall_seconds"),
+        "resolved_final_validation_wall_seconds": attrs.get("resolved_final_validation_wall_seconds"),
+        "wsi_settings": wsi,
         "shape": [int(value) for value in array.shape],
         "chunks": [int(value) for value in array.chunks],
         "dtype": str(array.dtype),
         "max_label_by_plane": maxima,
         "normalization": normalization,
-        "resolution": resolution,
+        "resolution": attrs["resolution"],
         "resolution_summary": attrs.get("resolution_summary") or {},
-        "validation": validation,
+        "resolution_validation_before_cleanup": attrs["resolution_validation_before_cleanup"],
+        "resolved_fragment_cleanup": attrs["resolved_fragment_cleanup"],
+        "validation": attrs["validation"],
     }
 
 
@@ -183,7 +296,8 @@ def compatible_work_zarr(paths: dict[str, Path], request: dict[str, Any]) -> dic
     if metadata is None or not paths["zarr"].exists():
         return None
     expected = configuration_fingerprint(request)
-    if metadata.get("schema_version") != WORK_SCHEMA_VERSION or metadata.get("fingerprint") != expected:
+    if (metadata.get("schema_version") != WORK_SCHEMA_VERSION or metadata.get("status") != "complete"
+            or metadata.get("fingerprint") != expected or metadata.get("request") != request):
         raise ValueError(
             f"Existing WSI recovery work at {paths['root']} is incompatible with this request. "
             "Rerun with --force to discard it."
@@ -217,14 +331,15 @@ def nearest_source_indices(start: int, stop: int, source_size: int, target_size:
 
 
 def _tile_iterator(
-    plane,
+    array,
     *,
+    plane_index: int,
     target_shape: tuple[int, int],
     tile_shape: tuple[int, int],
 ) -> tuple[Iterator[Any], dict[str, int]]:
     import numpy as np
 
-    source_height, source_width = (int(value) for value in plane.shape)
+    source_height, source_width = (int(value) for value in array.shape[-2:])
     target_height, target_width = target_shape
     tile_height, tile_width = tile_shape
     state = {"maximum": 0, "tiles": 0}
@@ -240,7 +355,9 @@ def _tile_iterator(
                 source_x = nearest_source_indices(x0, x1, source_width, target_width)
                 sx0, sx1 = int(source_x[0]), int(source_x[-1]) + 1
                 local_x = source_x - sx0
-                block = np.asarray(plane[sy0:sy1, sx0:sx1])
+                block = np.asarray(array[plane_index, sy0:sy1, sx0:sx1])
+                if np.any(block < 0) or (block.size and int(block.max()) > np.iinfo(np.uint32).max):
+                    raise ValueError("Resolved labels must be nonnegative and uint32-compatible.")
                 tile = np.asarray(block[np.ix_(local_y, local_x)], dtype=np.uint32)
                 if tile.size:
                     state["maximum"] = max(state["maximum"], int(tile.max()))
@@ -321,7 +438,7 @@ def export_resolved_zarr(
             ("cell", 1, partials["cell"]),
         ):
             iterator, state = _tile_iterator(
-                array[plane_index], target_shape=target_shape, tile_shape=tile_shape
+                array, plane_index=plane_index, target_shape=target_shape, tile_shape=tile_shape
             )
             with tifffile.TiffWriter(str(output_path), bigtiff=bigtiff) as writer:
                 writer.write(
@@ -374,6 +491,7 @@ def completed_manifest_matches(
             return False, "manifest is not complete"
         if manifest.get("configuration_fingerprint") != configuration_fingerprint(request):
             return False, "configuration fingerprint differs"
+        validate_manifest_metadata(manifest)
         expected_shape = tuple(int(value) for value in manifest["native_shape"])
         cell = inspect_mask_tiff(
             cell_path, expected_shape=expected_shape, scan_maximum=False

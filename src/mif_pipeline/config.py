@@ -18,6 +18,8 @@ NIMBUS_NORMALIZATION_MODES = ("prepared", "per_slide")
 INSTANSEG_MODES = ("medium", "wsi_global")
 INSTANSEG_WSI_RESOLUTION_METHODS = ("native", "watershed")
 INSTANSEG_WSI_ONLY_KEYS = {
+    "min_size",
+    "cleanup_resolved_fragments",
     "overlap",
     "detection_size",
     "normalization_percentiles",
@@ -230,9 +232,14 @@ def _validate_instanseg_block(
     if method not in INSTANSEG_WSI_RESOLUTION_METHODS:
         allowed = ", ".join(repr(value) for value in INSTANSEG_WSI_RESOLUTION_METHODS)
         raise ValueError(f"{location}.resolution_method must be one of {allowed}.")
-    for key in ("allow_unnucleated_cells", "cleanup_fragments"):
+    for key in ("allow_unnucleated_cells", "cleanup_fragments", "cleanup_resolved_fragments"):
         if key in block and not isinstance(block[key], bool):
             raise ValueError(f"{location}.{key} must be boolean.")
+    min_size = block.get("min_size", 10)
+    if isinstance(min_size, bool) or not isinstance(min_size, int) or min_size < 0:
+        raise ValueError(f"{location}.min_size must be a non-negative integer.")
+    if block.get("cleanup_resolved_fragments", False) and method != "watershed":
+        raise ValueError(f"{location}.cleanup_resolved_fragments requires watershed resolution.")
     seed_threshold = float(block.get("seed_threshold", 0.6))
     if not 0 <= seed_threshold <= 1:
         raise ValueError(f"{location}.seed_threshold must satisfy 0 <= value <= 1.")

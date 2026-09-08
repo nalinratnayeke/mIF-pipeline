@@ -83,12 +83,15 @@ def _write_source_and_resolved(output_path: Path, image_path: str, kwargs: dict)
     array.attrs.update(
         {
             "status": "complete",
+            "resolved_schema_version": 2,
             "source_image": image_path,
             "source_pixel_size_um": float(kwargs["pixel_size"]),
             "model_pixel_size_um": 0.5,
             "channel_ids": list(kwargs["channel_ids"]),
             "planes": ["nuclei", "cells"],
             "wsi_settings": {
+                "min_size": kwargs.get("min_size", 10),
+                "cleanup_resolved_fragments": kwargs.get("cleanup_resolved_fragments", False),
                 "tile_size": kwargs["tile_size"],
                 "overlap": kwargs["overlap"],
                 "detection_size": kwargs["detection_size"],
@@ -103,12 +106,38 @@ def _write_source_and_resolved(output_path: Path, image_path: str, kwargs: dict)
                 "method": kwargs["resolution_method"],
                 "allow_unnucleated_cells": kwargs["allow_unnucleated_cells"],
             },
-            "resolution_summary": {"ambiguous_cells": 1, "unmatched_nuclei": 0},
-            "validation": {
+            "resolution_summary": {"scope": "before_cleanup", "ambiguous_cells": 1, "unmatched_nuclei": 0,
+                "original_proxy_label_id_ranges": None, "original_unnucleated_label_id_ranges": [5, 6],
+                "policy_excluded_unnucleated_ids": 0, "policy_excluded_unnucleated_pixels": 0},
+            "resolution_validation_before_cleanup": {
+                "all_seed_markers_preserved": True,
+                "all_seeded_union_complete": True,
+                "all_unseeded_parent_territory_preserved": True,
                 "all_raw_nuclei_preserved": True,
                 "one_final_cell_id_per_raw_nucleus": True,
                 "nuclear_cell_ids_agree": True,
                 "all_proxy_cells_exact": True,
+            },
+            "resolved_fragment_cleanup": {
+                "schema_version": 1, "enabled": kwargs.get("cleanup_resolved_fragments", False),
+                "connectivity": 8, "min_size": kwargs.get("min_size", 10),
+                "strict_area_rule": "component_pixels > min_size",
+                "unnucleated_policy": "preserve_resolver_output", "metrics": {
+                    "before_nuclei": 4, "after_nuclei": 4, "before_cells": 5, "after_cells": 5,
+                    "before_nuclear_foreground_pixels": 8, "after_nuclear_foreground_pixels": 8,
+                    "before_cell_foreground_pixels": 12, "after_cell_foreground_pixels": 12,
+                    "removed_nuclear_pixels": 0, "total_removed_cell_pixels": 0,
+                },
+            },
+            "validation": {
+                "nuclear_cell_ids_agree": True, "all_proxy_cells_exact": True,
+                "nuclear_ids_have_cells": True, "unnucleated_policy_satisfied": True,
+                "cleanup_checks_applied": kwargs.get("cleanup_resolved_fragments", False),
+                "no_small_nuclear_components": True,
+                "all_nucleated_cell_components_anchored": True,
+                "final_nuclei": 4, "final_cells": 5,
+                "nuclear_foreground_pixels": 8, "cell_foreground_pixels": 12,
+                "max_label_by_plane": [4, 5],
             },
             "max_label_by_plane": [4, 5],
         }
@@ -151,8 +180,9 @@ def test_global_nearest_neighbor_export_is_exact_for_odd_rectangular_shape(tmp_p
     assert details["cell"]["max_label"] == 5
 
 
-def test_wsi_runner_calls_wsi_directly_writes_manifest_and_skips(tmp_path: Path, monkeypatch):
-    config = load_config(_write_config(tmp_path))
+@pytest.mark.parametrize("cleanup", [False, True])
+def test_wsi_runner_calls_wsi_directly_writes_manifest_and_skips(tmp_path: Path, monkeypatch, cleanup):
+    config = load_config(_write_config(tmp_path, cleanup_resolved_fragments=cleanup, min_size=0))
     slide = get_slide_config(config, "S1")
     image_path = Path(slide["full_merge"]["ome_path"])
     tifffile.imwrite(image_path, np.zeros((2, 35, 39), dtype=np.uint16), metadata={"axes": "CYX"})
@@ -162,7 +192,8 @@ def test_wsi_runner_calls_wsi_directly_writes_manifest_and_skips(tmp_path: Path,
         def __init__(self, model, verbosity=1):
             self.prediction_tag = ""
 
-        def eval_whole_slide_image_global_normalization(self, image, **kwargs):
+        def eval_whole_slide_image_global_normalization(self, image, *, min_size=10, cleanup_resolved_fragments=False, **kwargs):
+            kwargs.update(min_size=min_size, cleanup_resolved_fragments=cleanup_resolved_fragments)
             calls.append((image, kwargs))
             return _write_source_and_resolved(Path(kwargs["output_path"]), image, kwargs)
 
@@ -217,7 +248,8 @@ def test_wsi_runner_reuses_resolved_zarr_after_export_failure(tmp_path: Path, mo
         def __init__(self, model, verbosity=1):
             self.prediction_tag = ""
 
-        def eval_whole_slide_image_global_normalization(self, image, **kwargs):
+        def eval_whole_slide_image_global_normalization(self, image, *, min_size=10, cleanup_resolved_fragments=False, **kwargs):
+            kwargs.update(min_size=min_size, cleanup_resolved_fragments=cleanup_resolved_fragments)
             nonlocal inference_calls
             inference_calls += 1
             return _write_source_and_resolved(Path(kwargs["output_path"]), image, kwargs)
@@ -252,7 +284,8 @@ def test_wsi_runner_removes_partial_work_after_inference_failure(tmp_path: Path,
         def __init__(self, model, verbosity=1):
             self.prediction_tag = ""
 
-        def eval_whole_slide_image_global_normalization(self, image, **kwargs):
+        def eval_whole_slide_image_global_normalization(self, image, *, min_size=10, cleanup_resolved_fragments=False, **kwargs):
+            kwargs.update(min_size=min_size, cleanup_resolved_fragments=cleanup_resolved_fragments)
             partial = zarr.open(
                 str(kwargs["output_path"]), mode="w", shape=(2, 2, 2), dtype=np.int32
             )
@@ -303,3 +336,99 @@ def test_wsi_config_rejects_invalid_settings(tmp_path: Path, overrides, message)
 def test_medium_defaults_remain_compatible(tmp_path: Path):
     config = load_config(_write_config(tmp_path, mode="medium"))
     assert get_slide_config(config, "S1")["instanseg"]["mode"] == "medium"
+
+
+@pytest.mark.parametrize('value', [-1, True, 1.5, '10', None])
+def test_min_size_rejects_non_integer_or_negative(tmp_path, value):
+    with pytest.raises(ValueError, match='min_size'):
+        load_config(_write_config(tmp_path, min_size=value))
+
+
+@pytest.mark.parametrize('field,value', [('min_size', 10), ('cleanup_resolved_fragments', False)])
+def test_new_controls_are_wsi_only(tmp_path, field, value):
+    with pytest.raises(ValueError, match=field):
+        load_config(_write_config(tmp_path, mode='medium', **{field: value}))
+
+
+def test_cleanup_requires_watershed(tmp_path):
+    with pytest.raises(ValueError, match='watershed'):
+        load_config(_write_config(tmp_path, cleanup_resolved_fragments=True, resolution_method='native'))
+
+
+def test_streaming_export_never_indexes_a_whole_plane():
+    from mif_pipeline.instanseg_wsi import _tile_iterator
+
+    class BoundedArray:
+        shape = (2, 31, 37)
+        def __getitem__(self, key):
+            assert isinstance(key, tuple) and len(key) == 3
+            plane, ys, xs = key
+            assert ys.stop - ys.start < 31 and xs.stop - xs.start < 37
+            return np.full((ys.stop - ys.start, xs.stop - xs.start), plane + 1, dtype=np.int32)
+
+    tiles, state = _tile_iterator(BoundedArray(), plane_index=1, target_shape=(61, 73), tile_shape=(16, 16))
+    assert all(np.all(tile == 2) for tile in tiles)
+    assert state['maximum'] == 2
+
+
+@pytest.mark.parametrize('bad', [-1, 2**32])
+def test_streaming_export_rejects_out_of_range_labels(bad):
+    from mif_pipeline.instanseg_wsi import _tile_iterator
+    tiles, _ = _tile_iterator(np.full((2, 2, 2), bad, dtype=np.int64), plane_index=0,
+                              target_shape=(2, 2), tile_shape=(16, 16))
+    with pytest.raises(ValueError, match='uint32'):
+        list(tiles)
+
+
+def test_cleanup_fields_change_fingerprint(tmp_path):
+    from mif_pipeline.instanseg_wsi import configuration_fingerprint
+    settings = runner._wsi_settings(get_slide_config(load_config(_write_config(tmp_path)), 'S1')['instanseg'], aliases=['DAPI', 'PANCK'], indices=[0, 1])
+    baseline = configuration_fingerprint(settings)
+    for key, value in [('min_size', 11), ('cleanup_resolved_fragments', True), ('seed_threshold', 0.2)]:
+        assert configuration_fingerprint(dict(settings, **{key: value})) != baseline
+
+
+@pytest.mark.parametrize('section,key,value', [
+    ('resolution_validation_before_cleanup', 'all_raw_nuclei_preserved', False),
+    ('validation', 'all_proxy_cells_exact', False),
+    ('validation', 'final_nuclei', True),
+    ('validation', 'max_label_by_plane', [4, 9]),
+    ('resolved_fragment_cleanup', 'enabled', None),
+    ('resolved_fragment_cleanup', 'metrics', {}),
+    ('resolution_summary', 'scope', 'after_cleanup'),
+    ('resolution', 'allow_unnucleated_cells', None),
+])
+def test_metadata_rejects_inconsistent_contract(tmp_path, section, key, value):
+    from mif_pipeline.instanseg_wsi import validate_resolver_metadata
+    kwargs = dict(pixel_size=.325, channel_ids=[0, 1], tile_size=2048, overlap=80,
+                  detection_size=20, resolution_method='watershed',
+                  normalization_percentiles=[.1, 99.9], allow_unnucleated_cells=True)
+    path = _write_source_and_resolved(tmp_path / 'labels.zarr', 'unused.tif', kwargs)
+    details = dict(zarr.open(str(path), mode='r').attrs)
+    request = {'wsi': dict(kwargs, min_size=10, cleanup_resolved_fragments=False)}
+    validate_resolver_metadata(details, request)
+    details[section][key] = value
+    with pytest.raises(ValueError):
+        validate_resolver_metadata(details, request)
+
+
+def test_old_kwargs_api_fails_before_work_creation(tmp_path, monkeypatch):
+    config = load_config(_write_config(tmp_path))
+    slide = get_slide_config(config, 'S1')
+    tifffile.imwrite(Path(slide['full_merge']['ome_path']), np.zeros((2, 35, 39), dtype=np.uint16), metadata={'axes': 'CYX'})
+    class OldAPI:
+        def eval_whole_slide_image_global_normalization(self, image, **kwargs):
+            raise AssertionError('Old API must not execute')
+    monkeypatch.setattr(runner, '_import_instanseg', lambda: OldAPI)
+    monkeypatch.setattr(runner, 'instanseg_provenance', lambda: {})
+    with pytest.raises(RuntimeError, match='explicit min_size'):
+        runner.run_instanseg(config, 'S1')
+    assert not (Path(slide['mask_export']['mask_dir']) / '.S1_instanseg_wsi_work').exists()
+
+
+def test_legacy_completion_cannot_authorize_reuse(tmp_path):
+    from mif_pipeline.instanseg_wsi import completed_manifest_matches
+    path = tmp_path / 'manifest.json'
+    path.write_text(json.dumps({'schema_version': 1, 'status': 'complete'}))
+    valid, reason = completed_manifest_matches(path, {}, cell_path=tmp_path / 'c.tif', nuclear_path=tmp_path / 'n.tif')
+    assert not valid and 'schema' in reason

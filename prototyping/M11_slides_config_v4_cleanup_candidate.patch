@@ -1,0 +1,16 @@
+--- /data1/lowes/ratnayn/Analysis/M11_guidepool/M11_slides_config_v4.yaml
++++ /data1/lowes/ratnayn/Analysis/M11_guidepool/M11_slides_config_v4.yaml
+@@ -40,9 +40,11 @@
+   reference_channel: R1_DAPI
+   resolve_cell_and_nucleus: true
+   resolution_method: watershed
+-  allow_unnucleated_cells: true
++  allow_unnucleated_cells: false
+   cleanup_fragments: true
+-  seed_threshold: 0.6
++  min_size: 10
++  cleanup_resolved_fragments: true
++  seed_threshold: 0.2
+   planes:
+     nuclei_plane: 0
+     cells_plane: 1

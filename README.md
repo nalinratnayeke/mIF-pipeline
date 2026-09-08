@@ -77,6 +77,12 @@ Important points:
   channels by exact alias and writes only alignment-QC-owned artifacts plus an additive
   `alignment_qc` SpatialData table. It does not infer or change channel metadata.
 
+The provisional WSI example uses seed threshold 0.2 and conservative 8-connected post-watershed
+cleanup with `min_size: 10` and explicit `allow_unnucleated_cells: false`. Omitted settings retain
+the previous seed and disabled resolved cleanup. Both new controls are WSI-only; medium behavior
+is unchanged. See [cleanup contracts and acceptance gates](WSI_POST_RESOLUTION_CLEANUP.md) before
+cohort adoption. The updated fork API is required; work and manifest schemas are now version 2.
+
 Successful WSI inference first produces a resolved model-resolution Zarr in a hidden directory
 under `mask_export.mask_dir`. Native-resolution cell and nuclear TIFFs are then written tile by
 tile with one global nearest-neighbor coordinate transform. A completed manifest is committed

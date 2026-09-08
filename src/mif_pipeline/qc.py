@@ -10,7 +10,10 @@ from .config import (
     resolve_nimbus_channel_entries,
 )
 from .alignment_qc import _alignment_paths
-from .instanseg_wsi import configuration_fingerprint, inspect_mask_tiff, manifest_path, read_json
+from .instanseg_wsi import (
+    MANIFEST_SCHEMA_VERSION, configuration_fingerprint, inspect_mask_tiff,
+    manifest_path, read_json, validate_manifest_metadata,
+)
 
 
 def _import_tifffile():
@@ -100,10 +103,13 @@ def qc_slide(config: Union[dict[str, Any], str, Path], slide_id: str) -> dict[st
         try:
             manifest = read_json(completion_path)
             if manifest is not None:
+                schema = manifest.get("schema_version")
+                if schema == MANIFEST_SCHEMA_VERSION:
+                    validate_manifest_metadata(manifest)
                 request = manifest.get("request") or {}
                 fingerprint = configuration_fingerprint(request)
                 manifest_ok = (
-                    manifest.get("schema_version") == 1
+                    schema in (1, MANIFEST_SCHEMA_VERSION)
                     and manifest.get("status") == "complete"
                     and manifest.get("configuration_fingerprint") == fingerprint
                     and request.get("slide_id") == slide_id
@@ -114,7 +120,9 @@ def qc_slide(config: Union[dict[str, Any], str, Path], slide_id: str) -> dict[st
                     f"status={manifest.get('status')}, "
                     f"fingerprint={manifest.get('configuration_fingerprint')}"
                 )
-        except (OSError, TypeError, ValueError) as exc:
+                if schema == 1:
+                    detail += "; historical schema: no resolved-cleanup guarantee"
+        except (KeyError, OSError, TypeError, ValueError) as exc:
             detail = f"{type(exc).__name__}: {exc}"
         add_check("instanseg_wsi_manifest_complete", manifest_ok, detail)
 

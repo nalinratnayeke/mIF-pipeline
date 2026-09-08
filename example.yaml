@@ -30,9 +30,11 @@ instanseg:
   reference_channel: R0_DAPI
   resolve_cell_and_nucleus: true
   resolution_method: watershed
-  allow_unnucleated_cells: true
+  allow_unnucleated_cells: false
   cleanup_fragments: true
-  seed_threshold: 0.6
+  min_size: 10  # Model-resolution pixels; strict component area > min_size.
+  cleanup_resolved_fragments: true  # Provisional; acceptance gates in WSI_POST_RESOLUTION_CLEANUP.md.
+  seed_threshold: 0.2
   planes:
     nuclei_plane: 0
     cells_plane: 1

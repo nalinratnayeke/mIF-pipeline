@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from pathlib import Path
+import inspect
 from typing import Any, Union
 
 from .config import ensure_config, get_slide_config, normalize_instanseg_mode, resolve_block_aliases
@@ -236,6 +237,8 @@ def _wsi_settings(
             instanseg_block.get("allow_unnucleated_cells", True)
         ),
         "cleanup_fragments": bool(instanseg_block.get("cleanup_fragments", True)),
+        "cleanup_resolved_fragments": bool(instanseg_block.get("cleanup_resolved_fragments", False)),
+        "min_size": int(instanseg_block.get("min_size", 10)),
         "seed_threshold": float(instanseg_block.get("seed_threshold", 0.6)),
     }
 
@@ -348,6 +351,14 @@ def _run_wsi_global(
             "into this environment (editable --no-deps is supported)."
         )
     source = instanseg_provenance()
+    parameters = inspect.signature(
+        InstanSeg.eval_whole_slide_image_global_normalization
+    ).parameters
+    if not {"min_size", "cleanup_resolved_fragments"}.issubset(parameters):
+        raise RuntimeError(
+            "wsi_global requires the updated InstanSeg fork with explicit min_size "
+            "and cleanup_resolved_fragments WSI arguments; **kwargs alone is insufficient."
+        )
     request = _wsi_request(
         slide_id=slide["slide_id"],
         ome_path=ome_path,
@@ -435,6 +446,8 @@ def _run_wsi_global(
                     resolution_method=settings["resolution_method"],
                     allow_unnucleated_cells=settings["allow_unnucleated_cells"],
                     cleanup_fragments=settings["cleanup_fragments"],
+                    cleanup_resolved_fragments=settings["cleanup_resolved_fragments"],
+                    min_size=settings["min_size"],
                     seed_threshold=settings["seed_threshold"],
                 )
             )
@@ -484,6 +497,8 @@ def _run_wsi_global(
             "settings": zarr_details["resolution"],
             "summary": zarr_details["resolution_summary"],
             "validation": zarr_details["validation"],
+            "validation_before_cleanup": zarr_details["resolution_validation_before_cleanup"],
+            "fragment_cleanup": zarr_details["resolved_fragment_cleanup"],
         },
         "model_zarr": zarr_details,
         "native_shape": list(native_shape),
