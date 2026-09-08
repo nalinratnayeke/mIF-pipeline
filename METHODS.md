@@ -1,5 +1,13 @@
 # Methods
 
+## Document scope
+
+This file is the canonical description of the current production mIF pipeline. It describes adopted behavior and the rationale that remains relevant to current processing.
+
+Chronological development history is kept separately in `METHODS_LOG.md`. That log intentionally preserves experiments, failures, provisional states, and superseded decisions and therefore must not be treated as the current method when it conflicts with this file or the current implementation.
+
+InstanSeg retraining, training-dataset preparation, trained-model evaluation, and training experiments are kept in `METHODS_TRAINING.md`. Those experiments do not define the segmentation model used by the production pipeline unless a future production change explicitly adopts one of them.
+
 ## Overview
 
 We implemented a file-artifact pipeline for multiplex immunofluorescence (mIF) whole-slide and cropped-slide processing. The workflow separates image preparation, segmentation, cell-state inference, and final multimodal data assembly into explicit stages with stable on-disk handoffs. This design was chosen to improve cluster robustness, simplify restart behavior, and avoid brittle cross-environment object interchange.
@@ -118,39 +126,54 @@ The pipeline does not currently attempt to reconstruct a full microscope `Instru
 
 ## InstanSeg Segmentation
 
-### Execution mode
+### Model and execution mode
 
-Segmentation is performed through the direct InstanSeg API rather than through Harpy. The adopted
-full-slide mode is `wsi_global`; the prior `medium` mode remains supported for existing
-configurations and is still the default when `instanseg.mode` is absent. Both modes preserve the
-same simple file-artifact handoff:
+Segmentation is performed through the direct InstanSeg API rather than through Harpy. The current production configuration uses the released channel-invariant `fluorescence_nuclei_and_cells` model. Full-slide production uses `wsi_global`; the earlier `medium` path remains supported for compatibility, and a missing `instanseg.mode` still resolves to `medium`.
 
-- merged OME-TIFF in
-- whole-cell and nuclear instance masks out
+Both modes preserve the same file-artifact interface:
 
-WSI inference calculates exact uint16 histograms one selected channel at a time and derives one
-fixed pair of global percentile bounds per channel. Completely zero acquisition tiles in the
-reference channel are excluded, while zero pixels within acquired tiles remain part of the
-distribution. Spatial tiles select the configured channels before float32 conversion, apply the
-fixed transform, and run without tile-local normalization. Nuclear and cellular instances are
-stitched independently across the model-resolution slide.
+- `full_merge.ome.tif` in
+- whole-cell and nuclear instance-mask TIFFs out
 
-After stitching, the production resolver associates nuclei to cells by strict majority overlap,
-splits multiply associated cell territories with local nucleus-seeded watershed, preserves
-disconnected unseeded parent territory, and creates nucleus-shaped proxy cells for unmatched
-nuclei. Nuclear priority and final coordinated relabeling are validated globally before the
-resolved Zarr is accepted. `native` global resolution is retained only as an explicit comparison
-setting. WSI configuration exposes tile size, overlap, detection margin, batch size, normalization
-percentiles, reference-channel alias, and resolver settings. Medium mode continues to expose tile
-size and batch size only because `eval_medium_image()` controls its overlap internally.
+The physical pixel size from the merged image is passed to InstanSeg because model inference operates on a model-resolution grid. Segmentation channels are selected by ordered aliases from `instanseg.channels`, resolved through the slide channel map, and mapped to source indices in the canonical merged image.
 
-### Channel subset selection
+### Global-normalized WSI inference
 
-InstanSeg consumes a configured subset of channels defined by `instanseg.channels`. Those aliases are resolved against the channel map and then mapped to indices within `full_merge.ome.tif`. This lets segmentation operate on the canonical merged image without needing a second segmentation-specific merge artifact.
+The WSI path computes exact uint16 histograms one selected channel at a time and derives one fixed pair of configured percentile bounds per channel. Completely zero acquisition tiles in the configured reference channel are excluded from percentile estimation, while zero-valued pixels inside acquired tiles remain part of the distribution. Spatial reads select the requested channels before float32 conversion, apply the fixed global transform, and do not perform tile-local percentile normalization.
 
-### TiffSlide patch
+Inference tiles are generated at the model operating resolution. Nuclear and cellular predictions are intentionally produced unresolved and stitched independently across the slide before global nucleus/cell reconciliation. This avoids making tile-local nucleus/cell ID relationships authoritative across WSI tile boundaries. The production WSI configuration requires coordinated global resolution; `watershed` is the adopted resolver, while `native` global resolution is retained only for explicit comparisons.
 
-The segmentation stage preserves a validated TiffSlide patch for InstanSeg:
+The standard InstanSeg `cleanup_fragments` option acts during per-candidate tile postprocessing, before WSI stitching and global reconciliation. In the upstream postprocessing implementation, the thresholded candidate is flood-filled from its seed, disconnected candidate pixels are removed, and enclosed holes are filled. This tile-level operation is distinct from the post-resolution whole-slide cleanup described below.
+
+### Global nucleus/cell reconciliation
+
+The watershed resolver starts from independently stitched nuclear and whole-cell planes. Nucleus-to-cell overlap is accumulated from observed label pairs. A nucleus qualifies for a parent cell only when strictly more than half of its pixels overlap that cell. Raw cell territories are then classified according to the number of qualifying nuclei.
+
+Cell territories with multiple qualifying nuclei are split locally. Watershed is applied inside the parent-cell territory using qualifying nuclei as markers and the negative distance transform of the parent territory as the topographic surface. Daughter IDs are assigned deterministically. Disconnected parent territory without a seed is preserved rather than being silently discarded.
+
+After splitting, nuclear priority restores complete qualifying nuclei onto their corresponding daughter-cell territories. Nuclei without a qualifying parent are represented by unique nucleus-shaped proxy cells. Nuclear labels are then coordinated to the final cell IDs. The resolver can also retain or exclude raw unnucleated cells according to the explicit `allow_unnucleated_cells` policy.
+
+The full-slide implementation uses disk-backed model-resolution Zarr output and bounded/chunked operations around whole-slide bookkeeping and local watershed work rather than materializing native-resolution label rasters in memory.
+
+### Post-resolution fragment cleanup
+
+The production WSI implementation supports a second, explicitly separate cleanup after watershed reconciliation through `cleanup_resolved_fragments`. This step exists because tile-level `cleanup_fragments` cannot guarantee that a globally stitched and reconciled instance remains a single biologically plausible resolved object.
+
+Cleanup is performed at model resolution after nucleus priority and successful pre-cleanup watershed validation. Equal-ID connected components are evaluated with 8-connectivity. For each nuclear instance, nuclear components with area less than or equal to the configured `min_size` are removed; the strict retained-area rule is therefore `component_pixels > min_size`. Multiple components of the same nuclear ID may survive when each independently passes the size rule.
+
+Cell cleanup is anchored to the surviving same-ID nucleus. For each nucleated instance, cell components that contain no surviving nuclear pixels of that ID are removed. Consequently, if every nuclear component for a nucleated instance is rejected, its corresponding nucleated cell territory is also rejected. Resolver-emitted cell-only/unnucleated instances are not implicitly filtered by this cleanup step; whether they are present is controlled by the resolver's `allow_unnucleated_cells` policy. Original instance IDs are preserved rather than compactly renumbered.
+
+The `min_size` value is expressed in model-resolution component pixels. It is not a minimum final whole-cell area and is not defined in native-image pixels. The same explicit WSI `min_size` is forwarded to the updated InstanSeg inference path for tile postprocessing and, when resolved cleanup is enabled, for this final nuclear-component filter.
+
+Validation is deliberately split across the cleanup boundary. Pre-cleanup resolver validation records invariants of the watershed result, including preservation/assignment checks that are meaningful before filtering. Final validation is recomputed on the cleaned artifact and checks coordinated nuclear/cell IDs, existence of cells for retained nuclear IDs, proxy consistency, resolver policy, final label maxima, and—when cleanup is enabled—the nuclear component-size and nucleated-cell anchoring guarantees. Final validation does not falsely require every raw nucleus to remain after an explicitly filtering cleanup.
+
+### Medium-mode compatibility
+
+The earlier `medium` path remains available for existing configurations. It calls `eval_medium_image()` with the configured tile size and batch size; sliding-window overlap remains controlled internally by InstanSeg and is therefore not exposed as a supported medium-mode config setting. The retained fork correction stitches unresolved nuclear labels with an independent ID mapping when nucleus/cell reconciliation is disabled, rather than reusing the cell-derived mapping.
+
+### TiffSlide reader substitution
+
+The segmentation stage preserves the validated TiffSlide substitution used by the working reference workflow:
 
 ```python
 from tiffslide import TiffSlide
@@ -158,33 +181,23 @@ import instanseg.inference_class as ic
 ic.TiffSlide = TiffSlide
 ```
 
-This was retained because it was part of the previously working reference workflow and avoided reader compatibility issues.
+This is a targeted reader substitution rather than a reimplementation of InstanSeg inference.
 
-Operationally, this means the segmentation stage is still anchored in the native InstanSeg package behavior, with only a targeted reader substitution rather than a broader rewrite of the inference path.
+### Mask export, provenance, and restart behavior
 
-### Mask export
+The resolved model-resolution WSI Zarr is a restart artifact rather than a successful-run deliverable. Nuclear and whole-cell planes are streamed independently into full-canvas tiled uint32 TIFFs. For each native output pixel, one global pixel-center nearest-neighbor mapping selects the corresponding model-resolution label, so tile boundaries cannot reset the coordinate transform and no complete native-resolution mask is allocated.
 
-The resolved WSI Zarr is a restartable intermediate rather than a successful-run deliverable.
-Nuclear and whole-cell planes are streamed independently into full-canvas tiled uint32 TIFFs. For
-each native output pixel, a global pixel-center nearest-neighbor mapping selects the corresponding
-model-resolution label, so tile boundaries cannot reset the coordinate transform and no complete
-native mask is allocated in memory. Both temporary TIFFs are checked for shape, dtype, tiling, and
-label maximum before they replace the public outputs.
+Temporary TIFFs are validated for expected shape, dtype, tiling, and label maxima before replacing public outputs. A slide-level completion manifest is written last and records source identity, configuration fingerprint, channel/source selection, InstanSeg software provenance, normalization, resolver and cleanup validation, model-Zarr geometry, and native TIFF properties.
 
-An atomic slide-level InstanSeg manifest is written last. It records the source identity,
-configuration fingerprint, selected aliases and source indices, InstanSeg import path/version/git
-revision, normalization bounds, resolver validation, Zarr geometry, and native TIFF properties.
-Only masks accompanied by a compatible completed manifest are skipped in WSI mode. If export
-fails, the validated model-resolution Zarr is retained for retry; it and its normalization sidecar
-are deleted after both TIFFs and the manifest validate. Medium-mode mask export retains the prior
-nearest-neighbor in-memory behavior for compatibility.
+WSI outputs are reused only when accompanied by a compatible completed manifest. Legacy or incompatible masks do not silently authorize reuse. If native TIFF export fails after the model-resolution Zarr has validated, that Zarr is retained for restart; after both canonical TIFFs and the completion manifest validate, temporary WSI work is deleted.
 
-The exported masks are written as tiled uint32 TIFFs:
+The canonical segmentation outputs remain:
 
-- whole-cell mask
-- nuclear mask
+- tiled uint32 whole-cell mask TIFF
+- tiled uint32 nuclear mask TIFF
 
-Raster masks are treated as the canonical segmentation representation for the pipeline.
+Raster masks are the segmentation source of truth for Nimbus and SpatialData. Historical development of WSI inference, watershed reconciliation, connectedness diagnostics, and resolved-fragment cleanup is recorded in `METHODS_LOG.md`.
+
 
 ## Nimbus Inference
 
@@ -401,7 +414,7 @@ The pipeline’s current design was shaped by repeated practical constraints enc
 - one canonical merged TIFF is simpler than maintaining two merge artifacts
 - explicit file handoffs are more robust than cross-environment object exchange
 - slide-local Nimbus outputs are easier to recover than shared multislide output trees
-- direct InstanSeg file-artifact execution keeps both the adopted WSI path and retained medium compatibility independent of SpatialData
+- direct InstanSeg file-artifact execution keeps the adopted globally normalized WSI, watershed reconciliation, resolved-fragment cleanup, and retained medium compatibility independent of SpatialData
 - the `tiffslide`-based SpatialData import path behaved better on large merged images than earlier alternatives
 - raster labels are the source of truth; polygon layers are optional derivations
 
