@@ -2,231 +2,109 @@
 
 ## Read This First
 
-This repo has evolved beyond the original single-environment InstanSeg → Nimbus-only plan.
+This repository implements a file-artifact mIF processing pipeline. The current supported workflow is:
 
-The current supported workflow is:
-
-1. `setup`: generate channel maps
+1. `setup`: generate/refine channel maps
 2. `merge`: write one canonical `full_merge.ome.tif` per slide
-3. `instanseg`: run direct global-normalized WSI+watershed InstanSeg (or retained medium compatibility) and export whole-cell / nuclear masks
-4. `nimbus-prepare`: compute shared normalization JSONs across a selected slide set
-5. `nimbus`: run Nimbus per slide using slide-local chunk folders
-6. `assemble-spatialdata`: build and finalize the canonical slide-local SpatialData store
+3. `instanseg`: run InstanSeg and export whole-cell / nuclear masks
+4. `nimbus-prepare`: compute shared Nimbus normalization across a selected slide set
+5. `nimbus`: run Nimbus per slide with slide-local chunk folders
+6. `assemble-spatialdata`: build/finalize the canonical slide-local SpatialData store
 7. `qc`: run lightweight file and shape checks
 
-An optional explicit-only `alignment-qc` post-processing stage may run after a completed
-SpatialData store. It is not part of `run_all()` or the shell runners' default stage lists.
+`alignment-qc` is an optional explicit post-processing operation after SpatialData assembly. It is not part of `run_all()` or the shell runners' default stage lists.
 
-The intended cluster model is:
+The intended cluster model is interactive preparation for `setup` and `nimbus-prepare`, followed by one SLURM job per slide. Recovery should remain explicit: rerun that slide with the required stage list.
 
-- interactive prep in notebooks or Python API for `setup` and `nimbus-prepare`
-- one SLURM job per slide afterward
-- explicit restart by resubmitting that slide with a chosen stage list
+Do not reintroduce the legacy `seg_merge` artifact, shared multislide Nimbus output root, or chunk-group SLURM dependency graph unless the user explicitly requests that design change.
 
-Do not reintroduce the old multislide Nimbus output root, chunk-group SLURM graph, or `seg_merge` artifact unless the user explicitly requests that rollback.
+Treat current production behavior and artifact interfaces as the compatibility baseline for already-processed datasets.
 
-Treat the current upstream pipeline behavior and artifacts as the compatibility baseline for
-already-processed datasets. Alignment QC must not change channel-map schemas, rerun upstream
-stages, rebuild the canonical store, or rewrite unrelated SpatialData elements or transformations.
+## Documentation Routing
 
-## Reference Materials
+Use the documentation selectively rather than loading every historical file.
 
-Use the `Reference/` folder as the primary source of truth for external API usage and expected behavior.
+- `README.md`: public workflow and user-facing operation.
+- `METHODS.md`: canonical description of current production methodology and adopted rationale. Read it before materially changing pipeline behavior.
+- `METHODS_LOG.md`: chronological production development history. Read it when changing an existing algorithm, debugging unclear behavior, revisiting a prior design decision, or continuing experimental production-pipeline work.
+- `METHODS_TRAINING.md`: InstanSeg retraining, dataset preparation, model evaluation, and training experiment history. Read it only for training/model-development work.
+- `training/README.md`: operational training-matrix and submission instructions.
+- `Reference/`: external source/API snapshots and reference notebooks. Before changing third-party integration, inspect the relevant reference source rather than guessing the API.
 
-`Reference/` contains:
+`METHODS_INSTANSEG.md` is superseded by the three methods documents above and should not be maintained as a source of truth.
 
-- the `instanseg-main` repo snapshot
-- the `Nimbus-Inference` repo snapshot
-- prototype notebooks that informed the current call patterns
+`WSI_POST_RESOLUTION_CLEANUP.md` and `ASTRA_HANDOFF_WSI_POST_RESOLUTION_CLEANUP.md` are obsolete implementation handoff documents. Do not use them as current requirements or acceptance criteria. Current cleanup behavior is defined by the implementation, tests, config, and `METHODS.md`.
 
-Before changing external-tool integration, read the relevant reference notebook or source code instead of guessing the API.
+Ignore archived material under `old/` and `prototyping/Old/` unless the user explicitly asks to revisit it.
 
-## Current Design Decisions
+## Core Design Guardrails
 
-These are now deliberate and should be preserved unless the user asks for a change.
+### Canonical artifacts
 
-### Merged image strategy
+- Persist one merged image per slide: `full_merge.ome.tif`.
+- `instanseg.channels` and `nimbus.channels` select aliases from that canonical merge.
+- Whole-cell and nuclear TIFF masks are the canonical segmentation outputs.
+- Raster labels are the segmentation source of truth; shapes are optional derived artifacts.
+- The canonical multimodal deliverable is the final slide-local SpatialData store.
+- CLI provenance remains slide-local sidecars under `run_records/`; it is not a separate pipeline stage.
 
-- There is only one persisted merged image artifact per slide: `full_merge.ome.tif`.
-- `seg_merge` is no longer supported.
-- `instanseg.channels` defines the segmentation channel subset to read from the merged image.
-- `nimbus.channels` defines the Nimbus channel subset.
+### Environment separation
 
-### SpatialData strategy
+Keep the file-artifact boundary between environments:
 
-- The canonical deliverable is the final slide-local SpatialData store.
-- SpatialData assembly runs in a modern Harpy + SpatialData environment, separate from the InstanSeg/Nimbus environment.
-- The image import path should use the working `tiffslide -> zarr -> xarray -> DataTree -> SpatialData` approach, not the older direct `Image2DModel.parse(...)` path for the merged OME-TIFF.
-- Raster intensity aggregation is configurable through `spatialdata.aggregation_mode` and defaults to `mean`.
-- Optional `cytoplasm_labels` must be derived raster-first as cell labels minus overlapping nuclear pixels, preserving cell instance IDs on remaining cytoplasm pixels.
-- Raster labels are the segmentation source of truth.
-- Shapes are optional derived artifacts.
+- InstanSeg/Nimbus environment for merge, segmentation, and Nimbus.
+- Modern Harpy/SpatialData environment for SpatialData assembly and aggregation.
 
-### Interactive post-analysis strategy
+Do not replace stable on-disk handoffs with cross-environment in-memory object interchange without an explicit redesign.
 
-- Tumor GeoJSON annotation and PerturbView-style guide decoding remain notebook workflows, not
-  pipeline stages.
-- Treat `agg_cell_labels.instance_id` as the master cell index and join nuclear, cytoplasm, Nimbus,
-  and alignment tables explicitly by instance ID.
-- Decode combinatorial FISH measurements from `agg_nuclear_labels` unless the user requests a
-  different compartment.
-- Derive active bit positions from the supplied codebook and exclude positions unused across an
-  entire round from winner and runner-up selection while retaining their raw diagnostics.
-- Keep Nimbus and alignment measurements on their native feature axes rather than padding them into
-  raw-intensity AnnData layers.
-- Assign tumors through vector-only `cell_boundaries` queries and join `cell_id` explicitly to the
-  normalized master-table instance IDs; do not query the full raster-associated table.
-- Keep the H5AD as the authoritative per-cell export and leave the redundant full observation CSV
-  disabled by default for million-cell slides.
-- Export separate analysis artifacts; do not write derived tumor or decoding elements back to
-  canonical SpatialData stores by default.
+### Nimbus
 
-### Nimbus strategy
+- Reject legacy `nimbus.multislide`.
+- Keep Nimbus execution single-slide through `run_nimbus_chunked(...)`.
+- Shared cross-slide normalization is prepared explicitly through `prepare_nimbus_normalization(...)` and copied into slide-local `nimbus/chunk_XXX/` folders.
+- `nimbus.normalization_mode: prepared` remains the normal production path; `per_slide` is an explicit opt-in.
+- Keep `nimbus.output_dir` slide-local.
 
-- `nimbus.multislide` is no longer supported in config.
-- Shared normalization across slides is still supported, but only through `prepare_nimbus_normalization(...)`.
-- That prep step computes one normalization dictionary per chunk across the selected slide set, then copies `normalization_dict.json` into each slide-local `nimbus/chunk_XXX/` folder.
-- `run_nimbus_chunked(...)` is the only active Nimbus execution path and should remain single-slide.
+### SpatialData
 
-### Cluster strategy
+- Keep `spatialdata.store_path` slide-local.
+- Use the working `tiffslide -> zarr -> xarray -> DataTree -> SpatialData` image-import path rather than reviving the older direct merged-OME-TIFF `Image2DModel.parse(...)` path.
+- Aggregation mode must remain one of the supported `mean` / `sum` values.
+- Optional `cytoplasm_labels` are derived raster-first as cell labels minus overlapping nuclear pixels while preserving cell instance IDs.
+- Write the base image + labels first, then finalize the same store with aggregation, optional Nimbus import, and optional shapes.
+- Optional vectorized shapes must preserve the original non-contiguous raster instance IDs.
+- Keep mask chunks aligned to the image chunk grid when required by Harpy aggregation.
+- Prefer API-capability detection over hard-coded Harpy/SpatialData version cutoffs.
 
-- The shell runner `scripts/run_pipeline.sh` is the per-slide execution engine.
-- `scripts/run_pipeline_parallel.sh` is the per-slide SLURM submission wrapper.
-- The wrapper should submit one job per slide, not a dependency graph across chunk groups.
-- Recovery should remain “rerun the slide with an explicit stage list”.
-- The optional `alignment-qc` wrapper stage uses the SpatialData environment but must not be added to either runner's default stage list.
+### Interactive post-analysis
 
-## Config Expectations
+Tumor annotation and PerturbView-style guide decoding remain analysis/notebook workflows rather than core pipeline stages.
 
-The config schema should match `example.yaml`.
+- Treat `agg_cell_labels.instance_id` as the master cell index.
+- Join nuclear, cytoplasm, Nimbus, and alignment tables explicitly by instance ID.
+- Decode combinatorial FISH from `agg_nuclear_labels` unless another compartment is explicitly requested.
+- Keep Nimbus and alignment features on their native feature axes rather than padding them into raw-intensity AnnData layers.
+- Assign tumors through vector-only `cell_boundaries` queries and explicit `cell_id` joins.
+- Keep H5AD as the authoritative per-cell export; avoid redundant million-row observation CSVs by default.
+- Do not write derived tumor/guide analysis products back into canonical SpatialData stores by default.
 
-Top-level shared defaults commonly include:
+### Alignment QC
 
-- `pixel_size_um`
-- `setup`
-- `full_merge`
-- `instanseg`
-- `mask_export`
-- `nimbus`
-- `spatialdata`
-- `provenance`
+Alignment QC is additive and explicit-only.
 
-Per-slide blocks under `slides.<slide_id>` should define:
+- It must not rerun upstream stages, rebuild the canonical store, alter channel-map schemas, or rewrite unrelated SpatialData elements/transformations.
+- Keep channel selection alias-only and ordered by `alignment_qc.channels`.
+- Keep the current method ZNCC-only and pre-alignment unless an explicit design change is requested.
+- Do not add warping, displacement correction, thresholds, or cell filtering implicitly.
+- When restoring completed alignment-QC artifacts after a canonical-store rebuild, reconcile to `agg_cell_labels` explicitly by instance ID and verify stored micron coordinates before reuse.
+- Do not add compatibility handling for discarded alignment-QC prototypes unless explicitly requested.
 
-- `slide_dir`
-- `output_dir`
-- `channel_map_file`
+## InstanSeg Production Constraints
 
-Important config rules:
+The detailed production algorithm is documented in `METHODS.md`. Preserve these implementation contracts unless the user requests a deliberate change.
 
-- reject legacy `seg_merge`
-- reject legacy `nimbus.multislide`
-- keep `nimbus.output_dir` slide-local
-- keep `nimbus.normalization_mode: prepared` as the default; allow `per_slide` only as an explicit opt-in for single-slide normalization
-- keep `spatialdata.store_path` slide-local
-- validate `spatialdata.aggregation_mode` against the supported `mean` / `sum` options
-- keep cytoplasm derivation opt-in through `spatialdata.derive_cytoplasm_labels`
-- keep run-record provenance as slide-local CLI sidecars under `run_records/` by default; do not add it as a separate stage
-- keep `alignment_qc` optional and explicit-only; configs without the block must retain their current resolved behavior
-- keep alignment channel selection alias-only and ordered by `alignment_qc.channels`; do not migrate channel maps or infer AF/imaging metadata
-- keep alignment QC ZNCC-only and pre-alignment; do not add warping, displacement, thresholds, or cell filtering without an explicit design change
-- when restoring alignment QC after a canonical-store rebuild, reconcile completed artifacts to `agg_cell_labels` explicitly by instance ID and verify stored micron coordinates before reuse
-- treat the ZNCC configuration and schema as the first alignment-QC format; do not add compatibility handling for discarded prototypes
-
-The `setup` block may also define post-generation refinement rules:
-
-- `remove_aliases`: aliases to drop from every generated channel map
-- `rename_aliases`: alias remapping applied after generation
-
-These refinements must be applied before cross-slide alias matching is checked.
-
-## Channel Map Expectations
-
-`channel_map_file` is the primary explicit mapping source.
-
-Each entry should contain:
-
-- `alias`
-- `path`
-- optional `nimbus_name`
-
-Important behavior:
-
-- `full_merge.channels`, `instanseg.channels`, and `nimbus.channels` all refer to aliases
-- aliases must resolve through the channel map
-- use `nimbus_name` when present for Nimbus-facing naming and fallback logic
-
-## Python API Surface
-
-Prefer notebook-friendly functions returning small dictionaries.
-
-The main public functions are:
-
-- `load_config(config_path) -> dict`
-- `load_channel_map(channel_map_file) -> list[dict]`
-- `generate_channel_map(source_dir, channel_patterns, output_path) -> list[dict]`
-- `refine_channel_map(channel_map, *, remove_aliases=None, rename_aliases=None) -> list[dict]`
-- `setup_slide(config, slide_id, ...) -> dict`
-- `setup_slides(config, slide_ids=None, ...) -> dict`
-- `merge_slide_ometiffs(config, slide_id, ...) -> dict`
-- `run_instanseg(config, slide_id, ...) -> dict`
-- `prepare_nimbus_normalization(config, slide_ids=None, *, chunk_indices=None, ...) -> dict`
-- `run_nimbus_chunked(config, slide_id, *, chunk_indices=None, ...) -> dict`
-- `write_spatialdata_base(config, slide_id, ...) -> dict`
-- `finalize_spatialdata(config, slide_id, ...) -> dict`
-- `assemble_spatialdata(config, slide_id, ...) -> dict`
-- `qc_slide(config, slide_id) -> dict`
-- `run_all(config, slide_id) -> dict`
-- `run_alignment_qc(config, slide_id, ...) -> dict`
-
-## CLI Expectations
-
-The CLI entrypoint is `mif-pipeline`.
-
-Supported subcommands:
-
-- `run`
-- `setup`
-- `merge`
-- `instanseg`
-- `nimbus`
-- `nimbus-prepare`
-- `assemble-spatialdata`
-- `qc`
-- `dry-run`
-- `alignment-qc` (explicit post-processing only)
-
-Important:
-
-- the shell wrapper stage name is still `spatialdata`
-- the actual CLI subcommand is `assemble-spatialdata`
-- do not rename that wrapper stage casually, because restart workflows now depend on it
-
-## Cluster / Verification Expectations
-
-This project is developed against cluster data that is usually unavailable in Codex execution.
-
-When verifying:
-
-- prefer import checks, config parsing, path resolution, shell syntax checks, and smoke tests
-- do not assume access to `/data1/lowes/...`
-- do not block implementation on full end-to-end execution
-
-The runner now logs job context before stage execution, including:
-
-- hostname
-- SLURM job metadata
-- `CUDA_VISIBLE_DEVICES`
-- `nvidia-smi`
-- a PyTorch CUDA summary
-
-This logging exists because some cluster GPU failures were due to bad or unhealthy allocations rather than slide size or pipeline memory use. Preserve or improve this logging when touching cluster execution.
-
-## Validated Technical Constraints
-
-### InstanSeg
-
-- Keep the TiffSlide patch:
+- Support `wsi_global` and retained `medium` compatibility. Missing mode remains `medium`; active full-slide configurations use `wsi_global`.
+- Keep the validated TiffSlide substitution:
 
 ```python
 from tiffslide import TiffSlide
@@ -234,56 +112,79 @@ import instanseg.inference_class as ic
 ic.TiffSlide = TiffSlide
 ```
 
-- Support `wsi_global` and `medium`; missing mode remains `medium` for compatibility, while the example and active full-slide prototype use `wsi_global`.
-- Do not expose `instanseg.overlap` in the medium-mode config. `eval_medium_image()` controls sliding-window overlap internally; reject the unsupported setting instead of logging or silently ignoring it.
-- In `wsi_global`, require coordinated global resolution. Watershed is the production default; native global resolution is explicit comparison behavior only.
-- Keep resolved fragment cleanup WSI/watershed-only, with standard 8-connected model-resolution labeling and one explicit min_size shared with tile postprocessing. Preserve resolver-emitted unnucleated cells inside cleanup; their inclusion is an explicit resolver policy.
-- Keep pre-cleanup watershed validation separate from final cleaned-artifact validation, and recompute final maxima. Work/manifest schema 2 must not silently reuse legacy artifacts. Seed 0.2 is provisional pending WSI_POST_RESOLUTION_CLEANUP.md acceptance gates.
-- Treat the resolved model-resolution Zarr as a temporary restart artifact. Retain it after export failure and delete it only after both canonical TIFFs and the manifest validate.
-- Do not silently reuse WSI masks without a compatible completed manifest; require `--force` for legacy or incompatible artifacts.
-- Export masks as full-resolution tiled uint32 TIFFs.
-- Stream WSI label export from bounded Zarr regions with one global pixel-center nearest-neighbor mapping; never allocate a complete native-resolution mask.
-- Keep the whole-cell and nuclear TIFF paths unchanged because Nimbus and SpatialData consume them directly.
+- Do not expose `instanseg.overlap` for `medium`; `eval_medium_image()` controls overlap internally.
+- In `wsi_global`, require coordinated global nucleus/cell resolution. Watershed is the adopted production resolver; native global resolution is comparison behavior.
+- Keep unresolved nuclear and cell WSI outputs independently stitched before global reconciliation.
+- Keep tile-level InstanSeg `cleanup_fragments` conceptually distinct from post-resolution `cleanup_resolved_fragments`.
+- Resolved-fragment cleanup is WSI/watershed-only, operates on standard 8-connected equal-ID model-resolution components, and uses the explicit model-pixel `min_size`.
+- Preserve resolver-emitted unnucleated cells during fragment cleanup; whether they are present is controlled explicitly by the resolver policy.
+- Keep pre-cleanup watershed validation separate from final cleaned-artifact validation, and recompute final counts/maxima after cleanup.
+- Treat seed threshold as an explicit configurable inference parameter. Do not hard-code a historical experimental value or use obsolete handoff acceptance gates as authority.
+- Do not silently reuse incompatible WSI work or legacy masks. Compatible completed-manifest semantics remain required; legacy/incompatible outputs require explicit replacement/force behavior.
+- Treat the model-resolution resolved Zarr as temporary restart work: retain it after recoverable native-export failure and delete it only after both canonical TIFFs and the final completion manifest validate.
+- Export whole-cell and nuclear masks as full-resolution tiled uint32 TIFFs at the established paths.
+- Stream native label export from bounded Zarr regions with one global pixel-center nearest-neighbor mapping; never allocate a complete native-resolution mask.
 
-### Merge writer
+## Merge / TIFF Constraints
 
-- The merged OME-TIFF currently preserves channel names and physical pixel size metadata.
-- It does not currently preserve full microscope instrument metadata.
-- Nimbus may emit warnings about missing `InstrumentID`, detector metadata, microscope type, or objective metadata when reading the merged OME-TIFF.
-- Those warnings have so far been treated as cosmetic unless the user reports downstream functional issues.
+- The merged OME-TIFF preserves channel names and physical pixel size metadata.
+- It does not currently reconstruct complete microscope instrument metadata.
+- Missing `InstrumentID`, detector, microscope-type, or objective warnings from downstream readers have been treated as metadata-completeness warnings unless they cause a demonstrated functional problem.
+- Do not casually change canonical merged-image naming, axes, physical-resolution metadata, or channel-order semantics.
 
-### SpatialData / Harpy
+## Config and Channel-Map Constraints
 
-- Harpy allocation currently expects translation transforms during aggregation, so scale transforms must be handled carefully around finalize logic.
-- The pipeline writes the base image + labels first, then finalizes the same canonical store with aggregation, optional Nimbus import, and optional shapes.
-- Optional shapes are vectorized from labels with Harpy and should preserve the original non-contiguous raster instance IDs.
-- Harpy shape vectorization and intensity allocation must remain compatible with both current and legacy parameter naming; prefer API-capability detection over hard-coded version cutoffs.
-- Mask chunking must be aligned to the image chunk grid before Harpy aggregation when using native spatial chunks.
+Treat `example.yaml` and config validation code as the schema authority.
 
-## Documentation Expectations
+Important compatibility rules:
 
-When the pipeline behavior changes materially:
+- reject legacy `seg_merge`
+- reject legacy `nimbus.multislide`
+- keep Nimbus and SpatialData output paths slide-local
+- keep cytoplasm derivation opt-in
+- keep alignment QC optional and explicit-only
+- do not silently accept unsupported InstanSeg settings
+- preserve existing configs' resolved behavior unless a migration is explicitly intended
 
-- update `README.md`
-- update active prototype notebooks under `prototyping/`
-- update this `AGENTS.md`
-- prefer adding a durable markdown explanation instead of relying on notebook memory
+`channel_map_file` is the explicit alias mapping source. Entries contain `alias`, `path`, and optional `nimbus_name`. Alias-based channel selection must resolve through this map.
 
-For all InstanSeg inference, nucleus/cell reconciliation, watershed, dataset-loading, or
-training work, also maintain `METHODS_INSTANSEG.md`:
+If setup refinement rules are used, apply `remove_aliases` and `rename_aliases` before cross-slide alias matching.
 
-- read it before changing InstanSeg behavior or continuing an InstanSeg experiment
-- append a dated development-log entry for every material experiment, diagnostic, failure,
-  environment change, or training attempt, including negative and provisional results
-- update its publication-style methods only when a major persistent behavior or adopted
-  protocol changes; do not present exploratory notebook behavior as production methodology
-- record software distribution versions and source commits separately when they differ, and
-  keep production, fork-only, and experimental status explicit
+## Cluster and Verification Expectations
 
-## Continuation Guidance
+Cluster source data are often unavailable to Codex.
 
-- Read `README.md` for the public workflow.
-- Read `AGENTS.md` for implementation guardrails.
-- Read `METHODS.md` for the rationale behind the current design.
-- Read `METHODS_INSTANSEG.md` before InstanSeg inference, reconciliation, or training work.
-- Ignore archived files under `old/` and `prototyping/Old/` unless the user explicitly asks to revive them.
+When verifying changes:
+
+- prefer imports, config parsing, path resolution, unit/smoke tests, and shell syntax checks
+- do not assume access to `/data1/lowes/...`
+- do not block a valid implementation solely because a full end-to-end cluster run is unavailable
+- distinguish synthetic/local verification from actual slide/GPU acceptance
+
+Preserve the runner's cluster/GPU diagnostics when touching execution code, including hostname, SLURM context, `CUDA_VISIBLE_DEVICES`, `nvidia-smi`, and the PyTorch CUDA summary. These diagnostics exist because some failures were allocation/node problems rather than pipeline memory problems.
+
+The per-slide shell execution model is:
+
+- `scripts/run_pipeline.sh`: per-slide execution engine
+- `scripts/run_pipeline_parallel.sh`: one-job-per-slide SLURM submission wrapper
+
+Do not turn this back into a cross-slide dependency graph. The shell stage name `spatialdata` intentionally maps to CLI subcommand `assemble-spatialdata`; do not rename it casually because restart workflows depend on it.
+
+## Documentation Maintenance
+
+When production behavior changes materially:
+
+- update `METHODS.md` so it continues to describe the adopted current method
+- append a dated entry to `METHODS_LOG.md` for material experiments, diagnostics, failures, or design decisions that are useful future working memory
+- update `README.md` when user-facing workflow or operation changes
+- update this `AGENTS.md` only when implementation guardrails or documentation routing change
+- update active prototype notebooks when they are still part of the relevant workflow
+
+For InstanSeg training/model-development work:
+
+- read `METHODS_TRAINING.md` and `training/README.md`
+- append material training experiments, failures, environment changes, and model-evaluation results to `METHODS_TRAINING.md`
+- record software distribution versions and exact source commits/snapshots separately
+- do not promote a trained model or exploratory training behavior into `METHODS.md` until it is explicitly adopted for production
+
+Prefer durable concise documentation over relying on notebook memory, but do not duplicate the same current method across multiple top-level files.
