@@ -33,7 +33,7 @@ instanseg:
   allow_unnucleated_cells: false
   cleanup_fragments: true
   min_size: 10  # Model-resolution pixels; strict component area > min_size.
-  cleanup_resolved_fragments: true  # Provisional; acceptance gates in WSI_POST_RESOLUTION_CLEANUP.md.
+  cleanup_resolved_fragments: true  # Adopted WSI/watershed cleanup; see METHODS.md.
   seed_threshold: 0.2
   planes:
     nuclei_plane: 0

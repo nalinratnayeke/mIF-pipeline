@@ -7,6 +7,9 @@ dist/
 .ipynb_checkpoints/
 *.Zone.Identifier
 
+# Per-run scheduler submission manifests and logs.
+/logs/slurm/
+
 # Large, reproducible notebook-generated experimental artifacts.
 /experimental_data/**/*.ome.tif
 /experimental_data/**/*.tiff

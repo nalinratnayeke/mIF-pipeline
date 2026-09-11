@@ -2,7 +2,7 @@
 
 ## Scope
 
-This document contains InstanSeg retraining methodology, training-dataset preparation, trained-model evaluation, and the chronological training experiment record that was previously mixed into `METHODS_INSTANSEG.md`.
+This document contains InstanSeg retraining methodology, training-dataset preparation, trained-model evaluation, and the chronological training experiment record that was previously mixed into the archived `old/documentation/METHODS_INSTANSEG.md`.
 
 It is not part of the routine production-pipeline reading set. The canonical segmentation method used by the pipeline is documented in `METHODS.md`; no locally retrained model has replaced the released `fluorescence_nuclei_and_cells` model in production.
 

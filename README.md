@@ -26,13 +26,12 @@ There is no shared multislide Nimbus output root anymore. Nimbus normalization i
 
 ## Layout
 
-Active code lives under [src/mif_pipeline](/home/ratnayn/codex/mIF-pipeline/src/mif_pipeline).
+Active code lives under [src/mif_pipeline](src/mif_pipeline/).
 
-Active debugging notebooks live under [prototyping](/home/ratnayn/codex/mIF-pipeline/prototyping):
+Active debugging notebooks live under [prototyping](prototyping/):
 
-- [mif_pipeline_instanseg_nimbus_api_v1-Crop.ipynb](/home/ratnayn/codex/mIF-pipeline/prototyping/mif_pipeline_instanseg_nimbus_api_v1-Crop.ipynb)
-- [mif_pipeline_instanseg_nimbus_api_v1-fullslide.ipynb](/home/ratnayn/codex/mIF-pipeline/prototyping/mif_pipeline_instanseg_nimbus_api_v1-fullslide.ipynb)
-- [mif_pipeline_harpy_spatialdata_api_v1-Crop.ipynb](/home/ratnayn/codex/mIF-pipeline/prototyping/mif_pipeline_harpy_spatialdata_api_v1-Crop.ipynb)
+- [mif_pipeline_instanseg_nimbus_api_v1-Crop.ipynb](prototyping/mif_pipeline_instanseg_nimbus_api_v1-Crop.ipynb)
+- [mif_pipeline_harpy_spatialdata_api_v1-Crop.ipynb](prototyping/mif_pipeline_harpy_spatialdata_api_v1-Crop.ipynb)
 - [alignment_qc_zncc_validation.ipynb](prototyping/alignment_qc_zncc_validation.ipynb)
 - [tumor_annotation_perturbview_decode.ipynb](prototyping/tumor_annotation_perturbview_decode.ipynb)
 - [cohort_tumor_decode_qc.ipynb](prototyping/cohort_tumor_decode_qc.ipynb)
@@ -50,13 +49,13 @@ The WSI resolver comparison is separately gated, uses only the regenerated half-
 production segmentation-channel order, and compares native versus watershed global resolution
 without creating a standalone unresolved artifact.
 
-Reference implementations and external snapshots live under [Reference](/home/ratnayn/codex/mIF-pipeline/Reference).
+Reference implementations and external snapshots live under [Reference](Reference/).
 
-For a fuller rationale and a paper-style description of the implemented workflow, see [METHODS.md](/home/ratnayn/codex/mIF-pipeline/METHODS.md).
+For a fuller rationale and a paper-style description of the implemented workflow, see [METHODS.md](METHODS.md).
 
 ## Config
 
-See [example.yaml](/home/ratnayn/codex/mIF-pipeline/example.yaml) for the current schema.
+See [example.yaml](example.yaml) for the current schema.
 
 Important points:
 
@@ -77,11 +76,11 @@ Important points:
   channels by exact alias and writes only alignment-QC-owned artifacts plus an additive
   `alignment_qc` SpatialData table. It does not infer or change channel metadata.
 
-The provisional WSI example uses seed threshold 0.2 and conservative 8-connected post-watershed
+The production WSI example uses seed threshold 0.2 and conservative 8-connected post-watershed
 cleanup with `min_size: 10` and explicit `allow_unnucleated_cells: false`. Omitted settings retain
 the previous seed and disabled resolved cleanup. Both new controls are WSI-only; medium behavior
-is unchanged. See [cleanup contracts and acceptance gates](WSI_POST_RESOLUTION_CLEANUP.md) before
-cohort adoption. The updated fork API is required; work and manifest schemas are now version 2.
+is unchanged. The adopted cleanup contract is documented in [METHODS.md](METHODS.md). The updated
+fork API is required; work and manifest schemas are now version 2.
 
 Successful WSI inference first produces a resolved model-resolution Zarr in a hidden directory
 under `mask_export.mask_dir`. Native-resolution cell and nuclear TIFFs are then written tile by
@@ -181,7 +180,7 @@ Set `provenance.enabled: false` to disable records, or set `provenance.dirname` 
 
 ## IRIS / SLURM
 
-Use [scripts/run_pipeline.sh](/home/ratnayn/codex/mIF-pipeline/scripts/run_pipeline.sh) as the direct per-slide runner and [scripts/run_pipeline_parallel.sh](/home/ratnayn/codex/mIF-pipeline/scripts/run_pipeline_parallel.sh) as the SLURM submission wrapper.
+Use [scripts/run_pipeline.sh](scripts/run_pipeline.sh) as the direct per-slide runner and [scripts/run_pipeline_parallel.sh](scripts/run_pipeline_parallel.sh) as the SLURM submission wrapper.
 
 Recommended flow:
 
@@ -201,6 +200,15 @@ bash scripts/run_pipeline_parallel.sh \
   --slide SLIDE-0329_crop_2048 \
   --stage nimbus --stage spatialdata --stage qc
 ```
+
+Stages execute in the order supplied. When optional alignment QC and a final comprehensive QC are
+requested in the same job, use `instanseg,nimbus,spatialdata,alignment-qc,qc`; placing `qc` before
+`alignment-qc` records the not-yet-created alignment artifacts as missing.
+
+Lightweight QC validates the WSI completion manifest against its recorded request and checks the
+expected Nimbus artifacts, but it is not a complete cross-stage provenance audit between the exact
+mask revision and existing Nimbus outputs. Preserve dependency order and use separate versioned
+mask and Nimbus output directories when adopting new segmentation settings.
 
 `run_pipeline_parallel.sh --plan-only` prints one `sbatch` command per slide and writes a small manifest under the batch log directory.
 
@@ -340,7 +348,7 @@ The current pipeline shape reflects a few deliberate choices:
 - InstanSeg remains a direct file-artifact stage. Production full slides use global-normalized WSI inference and watershed reconciliation; medium mode remains available for existing configurations.
 - The shell wrapper stage name is `spatialdata`, but the CLI subcommand is `assemble-spatialdata`.
 
-The detailed rationale behind these decisions is documented in [METHODS.md](/home/ratnayn/codex/mIF-pipeline/METHODS.md).
+The detailed rationale behind these decisions is documented in [METHODS.md](METHODS.md).
 
 ## Operational Notes
 

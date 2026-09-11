@@ -31,9 +31,9 @@ Use the documentation selectively rather than loading every historical file.
 - `training/README.md`: operational training-matrix and submission instructions.
 - `Reference/`: external source/API snapshots and reference notebooks. Before changing third-party integration, inspect the relevant reference source rather than guessing the API.
 
-`METHODS_INSTANSEG.md` is superseded by the three methods documents above and should not be maintained as a source of truth.
-
-`WSI_POST_RESOLUTION_CLEANUP.md` and `ASTRA_HANDOFF_WSI_POST_RESOLUTION_CLEANUP.md` are obsolete implementation handoff documents. Do not use them as current requirements or acceptance criteria. Current cleanup behavior is defined by the implementation, tests, config, and `METHODS.md`.
+Superseded methods and WSI implementation handoff documents are archived under `old/`. Do not use
+them as current requirements or acceptance criteria. Current cleanup behavior is defined by the
+implementation, tests, config, and `METHODS.md`.
 
 Ignore archived material under `old/` and `prototyping/Old/` unless the user explicitly asks to revisit it.
 

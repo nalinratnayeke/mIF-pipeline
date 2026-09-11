@@ -281,7 +281,9 @@ InstanSeg model training, training-dataset work, and trained-model comparison hi
 - Candidate example/full-slide settings provisionally select seed_threshold=0.2 and allow_unnucleated_cells=false. Cohort adoption awaits user-run half-crop/full-slide visual, memory, runtime and downstream acceptance; no GPU inference or scheduler job was launched for this implementation. Production publication-style methods remain unchanged pending acceptance.
 - Whole model-resolution labeling replaces the proposed experimental chunked union-find path. The 128 GiB allocation is a proposed budget, not observed peak memory. Native TIFF export uses bounded three-axis Zarr reads; restart and manifest-last completion remain required.
 - Implementation isolated from existing dirty experiment notebooks and methods additions. Source bases: InstanSeg 8f75880b40ac3b521aecbf29a2c5ee30f386bd2a and mIF-pipeline 9b2e9809de93e379e5e331ab56b9347dd9477d44; implementation changes are uncommitted. Installed instanseg-torch distribution 0.1.1 is recorded separately from fork source revisions. Verified production environment dependencies include torch 2.10.0, zarr 2.18.3, scipy 1.15.3, scikit-image 0.25.2, tifffile 2025.5.10 and tiffslide 2.5.1.
-- See WSI_POST_RESOLUTION_CLEANUP.md for contracts, focused verification, staged acceptance and rollback gates. Active external M11 configuration remains unchanged.
+- The original contracts, focused verification, staged acceptance, and rollback gates are preserved
+  in `old/documentation/WSI_POST_RESOLUTION_CLEANUP.md`. They are historical context rather than
+  current acceptance criteria. Active external M11 configuration remained unchanged at this point.
 
 ### 2026-09-08 — Implementation review and synthetic integration verification
 
@@ -297,6 +299,27 @@ InstanSeg model training, training-dataset work, and trained-model comparison hi
 - Committed the InstanSeg implementation as source commit `7e10c63` on `codex/wsi-global-normalization`. The installed distribution version remains a separate identifier. The earlier implementation entry describes its then-uncommitted state; this entry records the subsequent integration.
 - Verified the combined original checkouts: 65 focused InstanSeg tests and all 159 mIF-pipeline tests passed. The mIF implementation and experimental history remain uncommitted at the time of this entry and are intended to be recorded together. No jobs, pushes, external M11 configuration changes, or environment reinstallations were performed.
 - Earlier chunked cleanup and unnucleated-cell removal results remain historical prototype evidence. The integrated implementation uses in-memory equal-ID 8-connected labeling, preserves resolver-emitted unnucleated cells during fragment cleanup, and controls their inclusion explicitly through the resolver policy. Seed 0.2 and cohort adoption remain provisional pending the documented half-crop/full-slide acceptance gates.
+
+### 2026-09-11 — Accepted M11 v4 WSI cleanup for production
+
+- Completed the configured WSI pipeline for `SLIDE-0329`, `SLIDE-0330`, and `SLIDE-0334` through
+  `SLIDE-0337` using the adopted seed threshold 0.2, watershed resolution,
+  `allow_unnucleated_cells=false`, and 8-connected resolved-fragment cleanup with strict
+  model-pixel `min_size=10`.
+- The representative `SLIDE-0329` completion manifest recorded 2,584,158 final coordinated
+  nucleus/cell IDs and passed all final resolver invariants. All 33 Nimbus chunks completed;
+  SpatialData assembly wrote cell, nuclear, and cytoplasm labels, matching aggregate tables,
+  boundary shapes, and the Nimbus table; alignment QC completed all 13 configured channels and
+  wrote its per-cell table into the canonical store.
+- Final lightweight QC reruns passed all configured checks for all six slides with no failed checks.
+  The initial `SLIDE-0329` QC ran before alignment QC and correctly reported the not-yet-created
+  alignment artifacts as missing; final combined stage lists must therefore place `alignment-qc`
+  before `qc`.
+- This completed full-slide and downstream acceptance promotes the v4 WSI cleanup settings from
+  candidate to the current production configuration. QC still checks the InstanSeg manifest for
+  internal consistency rather than proving that existing Nimbus outputs were generated from the
+  exact current mask revision, so dependency order and version-isolated output directories remain
+  operational requirements.
 
 ## References
 
